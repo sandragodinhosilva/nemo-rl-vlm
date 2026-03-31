@@ -1,4 +1,22 @@
-
+# Dataset loader for THRIVE-VLM multimodal SFT datasets.
+#
+# Supports three modalities:
+#   - Video: samples with 'video_frames' (list of frame paths) or 'video' field
+#   - Image: samples with 'image' or 'images' field
+#   - Text-only: no video/image fields
+#
+# Frame flipping:
+#   Many video samples have need_to_flip=True (camera was mounted mirror-side).
+#   Horizontal flip is applied via ImageOps.mirror() at load time for all three
+#   modalities (video_frames branch: line ~50, video branch: line ~75,
+#   image branch: line ~130). Verified 2026-03-30: all 7205 mcqa_video_2403
+#   train samples have need_to_flip=True and are correctly mirrored before
+#   being passed to the model processor.
+#
+# Message format:
+#   Multimodal content (image/video items) is prepended to the user message
+#   content list. If 'messages' is already in the example (standard HF format),
+#   it is used directly with multimodal content injected into the user turn.
 
 from typing import Any, Optional
 
@@ -33,10 +51,38 @@ def format_thrive_vlm_dataset(
     # Collect multimodal content
     multimodal_content = []
 
-    # Handle video content (check both "video" and "video_frames" field names)
-    video_value = example.get("video") or example.get("video_frames")
+    # Prefer explicit frame lists when available. Qwen's processor handles
+    # ordered image items more reliably than a synthetic "video" object built
+    # from frame paths/PIL images.
+    video_frames_value = example.get("video_frames")
+    video_value = example.get("video")
 
-    if video_value is not None:
+    if video_frames_value is not None:
+        image_value = video_frames_value
+        if not isinstance(image_value, (list, tuple)):
+            image_value = [image_value]
+
+        if len(image_value) > 0 and isinstance(image_value[0], str):
+            image_value = [Image.open(img_path).convert("RGB") for img_path in image_value]
+
+            if example.get("need_to_flip", False):
+                image_value = [ImageOps.mirror(img) for img in image_value]
+
+        for img in image_value:
+            image_content = {
+                "type": "image",
+                "image": img,
+            }
+
+            if "max_pixels" in example:
+                image_content["max_pixels"] = int(example["max_pixels"])
+            if "min_pixels" in example:
+                image_content["min_pixels"] = int(example["min_pixels"])
+
+            multimodal_content.append(image_content)
+
+    # Handle video content (native path/URL or preloaded frames stored in "video")
+    elif video_value is not None:
         # If video_value is a list of strings (frame paths), load them as PIL Images
         if isinstance(video_value, (list, tuple)) and len(video_value) > 0:
             if isinstance(video_value[0], str):
@@ -85,7 +131,6 @@ def format_thrive_vlm_dataset(
             video_content["min_pixels"] = int(example["min_pixels"])
 
         multimodal_content.append(video_content)
-
     # Handle image content (check both "image" and "images" field names) if no video
     else:
         image_value = example.get("image") or example.get("images")
