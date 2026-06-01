@@ -56,6 +56,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
     "thrive-vlm": {
         "actor_class_fqn": "nemo_rl.environments.thrive_vlm_environment.ThriveVLMEnvironment",
     },
+    "visual-obs": {
+        "actor_class_fqn": "nemo_rl.environments.thrive_vlm_environment.ThriveVLMEnvironment",
+    },
 }
 
 

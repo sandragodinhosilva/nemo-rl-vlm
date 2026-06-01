@@ -160,9 +160,11 @@ def format_thrive_vlm_grpo_dataset(
     })
 
     # Detect task type per-sample so mixed datasets work transparently.
-    # Full-exercise analysis samples have Q1-Q9 ratings keys; per-rep samples do not.
+    schema = example.get("schema", "")
     ratings = example.get("ratings", {})
-    if isinstance(ratings, dict) and "q1_consistency" in ratings:
+    if schema == "categorical":
+        task_type = "visual_obs"
+    elif isinstance(ratings, dict) and "q1_consistency" in ratings:
         task_type = "full_exercise"
     else:
         task_type = "repetition"
@@ -174,6 +176,7 @@ def format_thrive_vlm_grpo_dataset(
         "extra_env_info": {
             "ground_truth": assistant_content,
             "task_type": task_type,
+            "exercise_id": str(example.get("exercise_id", "")),
         },
     }
 
