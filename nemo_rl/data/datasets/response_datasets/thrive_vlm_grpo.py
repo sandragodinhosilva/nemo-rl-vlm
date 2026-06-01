@@ -274,7 +274,9 @@ class ThriveVLMGRPODataset:
         # Initialize these to None, will be set by set_task_spec and set_processor
         self.data_config = None
         self.processor = None
-        self.val_dataset = self.formatted_ds.get("validation")
+        # Do not auto-contribute val data from the train loader path;
+        # validation is handled via the explicit validation config entry.
+        self.val_dataset = None
 
     @property
     def dataset(self):
