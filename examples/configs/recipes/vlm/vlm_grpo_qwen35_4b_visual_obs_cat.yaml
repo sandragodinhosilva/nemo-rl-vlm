@@ -47,7 +47,7 @@ loss_fn:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/results/grpo_visual_obs_cat_1105_4b"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo_visual_obs_cat_1105_4b"
   metric_name: "val:accuracy"
   higher_is_better: true
   keep_top_k: 3

@@ -50,6 +50,11 @@ export PYTHONFAULTHANDLER=1
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 unset UV_CACHE_DIR
 
+# Put Ray worker venvs on /mnt/data to avoid /home space issues and
+# keep uv lock contention away from other builds on this node
+export NEMO_RL_VENV_DIR="/mnt/data/sgsilva/tmp/nemo-rl-ray-venvs"
+mkdir -p "$NEMO_RL_VENV_DIR"
+
 export PYTHONPATH="/home/sgsilva/nemo-rl-vlm/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src:${PYTHONPATH:-}"
 RAY_CMD="./.venv/bin/python -m ray.scripts.scripts"
 
@@ -128,7 +133,7 @@ if [ "$NODE_RANK" -eq 0 ]; then
 
     echo "Training started at $(date)" | tee -a "$LOG_FILE"
 
-    uv run python examples/run_vlm_grpo.py \
+    .venv/bin/python examples/run_vlm_grpo.py \
         --config "$CONFIG" \
         2>&1 | tee -a "$LOG_FILE"
 

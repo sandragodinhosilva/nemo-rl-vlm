@@ -2,7 +2,7 @@
 """Gradio dashboard for exploring and comparing GRPO training runs.
 
 Launch:
-    python tools/grpo_dashboard.py [--logs-dir /mnt/data/pmartins/logs_grpo] [--port 7860]
+    python tools/grpo_dashboard.py [--logs-dir /home/sgsilva/nemo-rl-vlm/logs_grpo] [--port 7860]
 """
 
 import argparse
@@ -19,7 +19,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_LOGS_DIR = "/mnt/data/pmartins/logs_grpo"
+DEFAULT_LOGS_DIR = "/home/sgsilva/nemo-rl-vlm/logs_grpo"
 
 # Known task types and their plottable numeric score fields (short names).
 # Unknown task types are discovered dynamically from reward_details keys.
@@ -2087,7 +2087,7 @@ def create_app(logs_dir):
 def main():
     parser = argparse.ArgumentParser(description="GRPO Training Dashboard")
     parser.add_argument("--logs-dir", default=DEFAULT_LOGS_DIR, help="Root directory containing run folders")
-    parser.add_argument("--port", type=int, default=7860, help="Port for Gradio server")
+    parser.add_argument("--port", type=int, default=7863, help="Port for Gradio server")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
     args = parser.parse_args()
 
