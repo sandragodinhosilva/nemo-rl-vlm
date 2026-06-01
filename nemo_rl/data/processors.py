@@ -159,11 +159,14 @@ def sft_processor(
 
         datum_dict = format_clevr_cogent_dataset(datum_dict)
     elif datum_dict.get("task_name") == "thrive-vlm":
-        from nemo_rl.data.datasets.response_datasets.thrive_vlm_grpo import (
-            format_thrive_vlm_grpo_dataset,
+        from nemo_rl.data.datasets.response_datasets.thrive_vlm import (
+            format_thrive_vlm_dataset,
         )
 
-        datum_dict = format_thrive_vlm_grpo_dataset(datum_dict, return_pil=True)
+        # SFT needs the general THRIVE multimodal formatter here, not the GRPO
+        # video-only formatter. Mixed image/text/video roots rely on this path
+        # preserving each row's native modality contract.
+        datum_dict = format_thrive_vlm_dataset(datum_dict, return_pil=True)
 
     message_log = get_formatted_message_log(
         datum_dict["messages"],

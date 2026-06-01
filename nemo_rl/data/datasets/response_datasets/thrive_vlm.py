@@ -19,14 +19,43 @@
 #   it is used directly with multimodal content injected into the user turn.
 
 from typing import Any, Optional
+import re
 
 from datasets import load_from_disk
 from PIL import Image, ImageOps
 from transformers.video_utils import VideoMetadata
 
 from nemo_rl.data import ResponseDatasetConfig
+from nemo_rl.data.datasets.response_datasets.thrive_vlm_common import (
+    filter_dataset_missing_local_media,
+    load_rgb_image,
+    normalize_thrive_media_paths,
+)
 from nemo_rl.data.interfaces import TaskDataSpec
 from nemo_rl.data.processors import PROCESSOR_REGISTRY
+
+
+def _normalize_video_frame_geometry(frames: list[Image.Image]) -> list[Image.Image]:
+    """Resize variable-size PIL frames to a common geometry.
+
+    Some promoted video rows contain frame lists with small within-video size
+    drift (for example one frame cropped a few pixels taller than the rest).
+    Qwen's video processor stacks frames into a single array, so mixed shapes
+    crash before tokenization. Keep frame order and timing unchanged and only
+    resize when necessary.
+    """
+    if not frames:
+        return frames
+
+    base_size = frames[0].size
+    if all(frame.size == base_size for frame in frames):
+        return frames
+
+    resampling = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
+    return [
+        frame if frame.size == base_size else frame.resize(base_size, resample=resampling)
+        for frame in frames
+    ]
 
 
 def format_thrive_vlm_dataset(
@@ -48,50 +77,65 @@ def format_thrive_vlm_dataset(
         Formatted message log dictionary
     """
 
+    example = normalize_thrive_media_paths(example)
+    extra_env_info = dict(example.get("extra_env_info") or {})
+    for key in (
+        "source_dataset",
+        "source_modality",
+        "source_split",
+        "question_category",
+        "exercise_code",
+        "exercise_name",
+        "body_region",
+        "variant",
+        "session_mode",
+        "pain_bucket",
+    ):
+        value = example.get(key)
+        if value not in (None, "", [], {}):
+            extra_env_info[key] = value
+
     # Collect multimodal content
     multimodal_content = []
 
-    # Prefer explicit frame lists when available. Qwen's processor handles
-    # ordered image items more reliably than a synthetic "video" object built
-    # from frame paths/PIL images.
     video_frames_value = example.get("video_frames")
+    if video_frames_value in (None, "", [], {}):
+        video_frames_value = None
+
     video_value = example.get("video")
+    if video_value in (None, "", [], {}):
+        video_value = None
 
     if video_frames_value is not None:
-        image_value = video_frames_value
-        if not isinstance(image_value, (list, tuple)):
-            image_value = [image_value]
-
-        if len(image_value) > 0 and isinstance(image_value[0], str):
-            image_value = [Image.open(img_path).convert("RGB") for img_path in image_value]
-
-            if example.get("need_to_flip", False):
-                image_value = [ImageOps.mirror(img) for img in image_value]
-
-        for img in image_value:
-            image_content = {
-                "type": "image",
-                "image": img,
-            }
-
-            if "max_pixels" in example:
-                image_content["max_pixels"] = int(example["max_pixels"])
-            if "min_pixels" in example:
-                image_content["min_pixels"] = int(example["min_pixels"])
-
-            multimodal_content.append(image_content)
+        # Keep frame lists grouped as a single video item. This matches the
+        # Qwen3.5-VL processor/model expectation that video tensors and video
+        # token slots stay aligned per sample instead of being expanded into a
+        # sequence of unrelated image items.
+        video_value = video_frames_value
 
     # Handle video content (native path/URL or preloaded frames stored in "video")
-    elif video_value is not None:
+    if video_value is not None:
+        extra_env_info["need_to_flip"] = bool(example.get("need_to_flip", False))
         # If video_value is a list of strings (frame paths), load them as PIL Images
         if isinstance(video_value, (list, tuple)) and len(video_value) > 0:
-            if isinstance(video_value[0], str):
+            if isinstance(video_value[0], str) and return_pil:
                 # Load frame paths into PIL Images
-                video_value = [Image.open(frame_path).convert("RGB") for frame_path in video_value]
+                video_value = [
+                    load_rgb_image(
+                        frame_path,
+                        example,
+                        "video_frames" if video_frames_value is not None else "video",
+                    )
+                    for frame_path in video_value
+                ]
 
                 # Apply horizontal flip if requested in dataset
                 if example.get("need_to_flip", False):
                     video_value = [ImageOps.mirror(frame) for frame in video_value]
+
+                # Qwen video preprocessing expects all frames in a sample to
+                # share the same spatial size.
+                video_value = _normalize_video_frame_geometry(video_value)
 
         video_content = {
             "type": "video",
@@ -111,17 +155,31 @@ def format_thrive_vlm_dataset(
         if isinstance(video_value, (list, tuple)) and len(video_value) > 0:
             # Get frame dimensions from first frame
             first_frame = video_value[0]
-            if hasattr(first_frame, 'size'):  # PIL Image
+            if isinstance(first_frame, str):
+                temp_frame = load_rgb_image(
+                    first_frame,
+                    example,
+                    "video_frames" if video_frames_value is not None else "video",
+                )
+                width, height = temp_frame.size
+            elif hasattr(first_frame, 'size'):  # PIL Image
                 width, height = first_frame.size
             else:
                 height, width = first_frame.shape[-2:]
 
+            frame_indices = example.get("frame_indices")
+            if not isinstance(frame_indices, list) or len(frame_indices) != len(video_value):
+                frame_indices = list(range(len(video_value)))
+            total_num_frames = example.get("num_frames")
+            if total_num_frames in (None, "", [], {}):
+                total_num_frames = len(video_value)
+
             video_metadata = VideoMetadata(
-                total_num_frames=len(video_value),
+                total_num_frames=int(total_num_frames),
                 fps=fps_value,
                 width=width,
                 height=height,
-                frames_indices=list(range(len(video_value))),  # All frames, in order
+                frames_indices=[int(idx) for idx in frame_indices],
             )
             video_content["video_metadata"] = video_metadata
 
@@ -133,7 +191,11 @@ def format_thrive_vlm_dataset(
         multimodal_content.append(video_content)
     # Handle image content (check both "image" and "images" field names) if no video
     else:
-        image_value = example.get("image") or example.get("images")
+        image_value = example.get("image")
+        if image_value in (None, "", [], {}):
+            image_value = example.get("images")
+        if image_value in (None, "", [], {}):
+            image_value = None
 
         if image_value is not None:
             # Ensure images is always a list
@@ -141,8 +203,11 @@ def format_thrive_vlm_dataset(
                 image_value = [image_value]
 
             # If image_value is a list of strings (image paths), load them as PIL Images
-            if len(image_value) > 0 and isinstance(image_value[0], str):
-                image_value = [Image.open(img_path).convert("RGB") for img_path in image_value]
+            if len(image_value) > 0 and isinstance(image_value[0], str) and return_pil:
+                image_value = [
+                    load_rgb_image(img_path, example, "image")
+                    for img_path in image_value
+                ]
 
                 # Apply horizontal flip if requested in dataset
                 if example.get("need_to_flip", False):
@@ -169,6 +234,22 @@ def format_thrive_vlm_dataset(
         messages = example["messages"]
         for msg in messages:
             if msg["role"] == "user":
+                # Some upstream THRIVE rows carry an empty image_url alongside a
+                # text item. Strip it before injecting media so the chat template
+                # sees only the actual multimodal payload we provide here.
+                if isinstance(msg.get("content"), list):
+                    cleaned_content = []
+                    for item in msg["content"]:
+                        if not isinstance(item, dict):
+                            cleaned_content.append(item)
+                            continue
+                        cleaned_item = item.copy()
+                        if cleaned_item.get("type") == "text":
+                            image_url = cleaned_item.get("image_url")
+                            if image_url == {"url": ""} or image_url == "":
+                                cleaned_item.pop("image_url", None)
+                        cleaned_content.append(cleaned_item)
+                    msg["content"] = cleaned_content
                 # If content is a string, convert to list format
                 if isinstance(msg["content"], str):
                     # Prepend multimodal content (videos/images) before text
@@ -183,6 +264,7 @@ def format_thrive_vlm_dataset(
         ret = {
             "messages": messages,
             "task_name": example.get("task_name", "thrive-vlm"),
+            "extra_env_info": extra_env_info or None,
         }
     else:
         # Original format: build messages from question/answer fields
@@ -205,7 +287,33 @@ def format_thrive_vlm_dataset(
                 },
             ],
             "task_name": "thrive-vlm",
+            "extra_env_info": extra_env_info or None,
         }
+
+    assistant_has_reasoning = False
+    for message in ret["messages"]:
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            assistant_has_reasoning = bool(
+                re.search(r"<(?:think|thinking)>", content, re.IGNORECASE)
+            )
+        elif isinstance(content, list):
+            text_parts = [
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict)
+            ]
+            assistant_has_reasoning = bool(
+                re.search(r"<(?:think|thinking)>", "".join(text_parts), re.IGNORECASE)
+            )
+        if assistant_has_reasoning:
+            break
+
+    merged_extra_env_info = dict(ret.get("extra_env_info") or {})
+    merged_extra_env_info["reasoning"] = assistant_has_reasoning
+    ret["extra_env_info"] = merged_extra_env_info
 
     return ret
 
@@ -214,13 +322,19 @@ def prepare_thrive_vlm_dataset(
     split: str = "train",
     dataset_name: str = "thrive-vlm",
     task_name: Optional[str] = None,
+    split_validation_size: float = 0.05,
+    seed: int = 42,
+    skip_missing_local_media_filter: bool = False,
 ):
     """Prepare THRIVE-VLM dataset for training.
 
     Args:
-        split: Dataset split to load (train, validation, test)
+        split: Dataset split to load (train or validation)
         dataset_name: Local path to dataset directory (saved with save_to_disk)
         task_name: Optional task name override
+        split_validation_size: Validation fraction to derive from train when
+            the dataset root does not provide a native validation split
+        seed: Seed for deterministic train/validation splitting
 
     Returns:
         Dictionary with train and validation splits
@@ -234,19 +348,62 @@ def prepare_thrive_vlm_dataset(
     # Check if raw is a DatasetDict or a single Dataset
     if hasattr(raw, 'keys') and callable(raw.keys):
         # It's a DatasetDict with splits
-        if split == "train":
-            train_dataset = raw["train"]
-            val_dataset = raw.get("validation", raw.get("val", raw["train"]))
+        native_val_dataset = raw.get("validation", raw.get("val"))
+        if native_val_dataset is not None:
+            if split == "train":
+                train_dataset = raw["train"]
+                val_dataset = native_val_dataset
+            else:
+                train_dataset = native_val_dataset
+                val_dataset = native_val_dataset
         else:
-            if split not in raw:
+            if "train" not in raw:
                 raise ValueError(f"Split '{split}' not found. Available: {list(raw.keys())}")
+            if split_validation_size <= 0:
+                derived_train = raw["train"]
+                derived_val = raw["train"]
+            else:
+                split_dataset = raw["train"].train_test_split(
+                    test_size=split_validation_size, seed=seed
+                )
+                derived_train = split_dataset["train"]
+                derived_val = split_dataset["test"]
 
-            train_dataset = raw[split]
-            val_dataset = raw[split]
+            if split == "train":
+                train_dataset = derived_train
+                val_dataset = derived_val
+            else:
+                train_dataset = derived_val
+                val_dataset = derived_val
     else:
         # It's a single Dataset, use it for both train and validation
-        train_dataset = raw
-        val_dataset = raw
+        if split_validation_size > 0:
+            split_dataset = raw.train_test_split(test_size=split_validation_size, seed=seed)
+            derived_train = split_dataset["train"]
+            derived_val = split_dataset["test"]
+            if split == "train":
+                train_dataset = derived_train
+                val_dataset = derived_val
+            else:
+                train_dataset = derived_val
+                val_dataset = derived_val
+        else:
+            train_dataset = raw
+            val_dataset = raw
+
+    train_dataset = filter_dataset_missing_local_media(
+        train_dataset,
+        "train",
+        "THRIVE-VLM SFT",
+        skip_missing_local_media_filter=skip_missing_local_media_filter,
+    )
+    val_split_name = "validation" if split == "train" else split
+    val_dataset = filter_dataset_missing_local_media(
+        val_dataset,
+        val_split_name,
+        "THRIVE-VLM SFT",
+        skip_missing_local_media_filter=skip_missing_local_media_filter,
+    )
 
     # Format - disable features to avoid schema conflicts
     train_dataset = train_dataset.add_column("task_name", [task_name] * len(train_dataset))
@@ -269,6 +426,9 @@ class ThriveVLMDataset:
         dataset_name: str,
         split: str = "train",
         data_path: Optional[str] = None,
+        split_validation_size: float = 0.05,
+        seed: int = 42,
+        skip_missing_local_media_filter: bool = False,
         **kwargs,  # Accept other params from config
     ):
         if split not in ["train", "validation"]:
@@ -284,6 +444,9 @@ class ThriveVLMDataset:
             split=split,
             task_name=self.task_name,
             dataset_name=path,
+            split_validation_size=split_validation_size,
+            seed=seed,
+            skip_missing_local_media_filter=skip_missing_local_media_filter,
         )
 
         self.task_spec = TaskDataSpec(

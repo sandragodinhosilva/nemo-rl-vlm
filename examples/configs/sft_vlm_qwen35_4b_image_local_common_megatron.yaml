@@ -1,0 +1,28 @@
+defaults:
+  - sft_vlm_qwen35_4b_local_common_megatron.yaml
+
+# Image-optimized macro settings for auxiliary SFT on the current local Qwen3.5-4B cluster.
+
+policy:
+  train_global_batch_size: 64
+  train_micro_batch_size: 4
+  max_total_sequence_length: 4096
+
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    apply_rope_fusion: false
+
+    optimizer:
+      lr: 5e-6
+      min_lr: 5e-7
+      adam_beta2: 0.98
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: true
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 8
+  seed: 42
+  roles_to_train_on: ["assistant"]

@@ -33,6 +33,46 @@ import yaml
 PathLike = Union[str, "os.PathLike[Any]"]
 
 
+def _resolve_checkpoint_dir(checkpoint_dir: PathLike) -> Path:
+    """
+    Resolve checkpoint directory paths with a local safety default.
+
+    In this environment, writing checkpoints under a repo-local relative
+    `results/...` path can easily fill up `/home`. To make configs more robust:
+      - absolute paths are left unchanged
+      - `results/...` is redirected under `$NRL_CHECKPOINT_ROOT` if set, else
+        `/mnt/data/sgsilva/checkpoints` when it exists
+      - other relative paths are left unchanged
+    """
+    raw = os.path.expanduser(os.path.expandvars(str(checkpoint_dir)))
+    path = Path(raw)
+
+    if path.is_absolute():
+        return path
+
+    parts = path.parts
+    if parts and parts[0] == "results":
+        env_root = os.environ.get("NRL_CHECKPOINT_ROOT", "").strip()
+        if env_root:
+            resolved = Path(env_root) / Path(*parts[1:])
+            warnings.warn(
+                f"Redirecting checkpoint_dir '{checkpoint_dir}' -> '{resolved}' via NRL_CHECKPOINT_ROOT",
+                stacklevel=2,
+            )
+            return resolved
+
+        default_root = Path("/mnt/data/sgsilva/checkpoints")
+        if default_root.exists():
+            resolved = default_root / Path(*parts[1:])
+            warnings.warn(
+                f"Redirecting checkpoint_dir '{checkpoint_dir}' -> '{resolved}' (set NRL_CHECKPOINT_ROOT to override)",
+                stacklevel=2,
+            )
+            return resolved
+
+    return path
+
+
 class CheckpointingConfig(TypedDict):
     """Configuration for checkpoint management.
 
@@ -94,7 +134,7 @@ class CheckpointManager:
         Args:
             config (CheckpointingConfig)
         """
-        self.checkpoint_dir = Path(config["checkpoint_dir"])
+        self.checkpoint_dir = _resolve_checkpoint_dir(config["checkpoint_dir"])
         self.metric_name: str | None = config["metric_name"]
         self.higher_is_better = config["higher_is_better"]
         self.keep_top_k = config["keep_top_k"]

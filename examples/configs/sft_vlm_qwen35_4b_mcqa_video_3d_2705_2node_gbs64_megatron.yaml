@@ -13,11 +13,11 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_3d_2605"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"
   metric_name: "val:val_loss"
   higher_is_better: false
   keep_top_k: 3
-  save_period: 41  # 1324 rows / gbs 32 ~= 42 steps/epoch (no val holdout)
+  save_period: 20  # 1324 rows / gbs 32 ~= 42 steps/epoch (no val holdout)
   checkpoint_must_save_by: null
 
 policy:
@@ -29,6 +29,11 @@ policy:
   # [heads, S, S] score tensor (the 11.82 GiB allocation that was crashing).
   max_total_sequence_length: 65536
   train_micro_batch_size: 1
+  # SCALING TEST (2-node): gbs 64 (2x the 1-node 32). 16 GPUs, TP=2 -> DP=8,
+  # so 64 / 8 / mbs1 = 8 micro-batches per replica per step. Larger effective
+  # batch changes optimization dynamics; verify_and_fix recomputes the LR
+  # schedule + save_period below for the new steps/epoch (~1324/64 ~= 21).
+  train_global_batch_size: 64
   megatron_cfg:
     activation_checkpointing: true
     sequence_parallel: true
@@ -38,8 +43,8 @@ policy:
       optimizer_cpu_offload: true
       optimizer_offload_fraction: 1.0
     scheduler:
-      lr_decay_iters: 123  # 1324 rows / gbs 32 ~= 42 steps/epoch x 3 epochs
-      lr_warmup_iters: 13  # ~10% warmup
+      lr_decay_iters: 60  # 1324 rows / gbs 32 ~= 42 steps/epoch x 3 epochs
+      lr_warmup_iters: 6  # ~10% warmup
 
 data:
   _override_: true
@@ -52,7 +57,7 @@ data:
   seed: 42
   train:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_3d_2605/arrow_train
+    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_3d_2705/arrow_train
     split: train
     split_validation_size: 0  # train on ALL rows; no derived 5% val holdout
   validation: null
@@ -69,18 +74,18 @@ data:
 # unchanged from the 2-GPU/DP=1 run -- only throughput changes (~4x).
 cluster:
   gpus_per_node: 8
-  num_nodes: 1
+  num_nodes: 2
 
 logger:
-  log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+  log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"
   tensorboard:
-    log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+    log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    run_name: "sft_qwen35_4b_mcqa_video_3d_2705_2node_gbs64"

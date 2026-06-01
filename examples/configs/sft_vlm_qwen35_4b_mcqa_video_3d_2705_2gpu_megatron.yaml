@@ -13,7 +13,7 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_3d_2605"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_3d_2705_2gpu"
   metric_name: "val:val_loss"
   higher_is_better: false
   keep_top_k: 3
@@ -48,11 +48,11 @@ data:
   add_eos: true
   add_generation_prompt: false
   shuffle: true
-  num_workers: 16
+  num_workers: 8
   seed: 42
   train:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_3d_2605/arrow_train
+    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_3d_2705/arrow_train
     split: train
     split_validation_size: 0  # train on ALL rows; no derived 5% val holdout
   validation: null
@@ -68,19 +68,19 @@ data:
 # so steps-per-epoch (~42) and the LR schedule (lr_decay_iters: 123) are
 # unchanged from the 2-GPU/DP=1 run -- only throughput changes (~4x).
 cluster:
-  gpus_per_node: 8
+  gpus_per_node: 2
   num_nodes: 1
 
 logger:
-  log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+  log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2705_2gpu"
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_3d_2705_2gpu"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_3d_2705_2gpu"
   tensorboard:
-    log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+    log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2705_2gpu"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    run_name: "sft_qwen35_4b_mcqa_video_3d_2705_2gpu"

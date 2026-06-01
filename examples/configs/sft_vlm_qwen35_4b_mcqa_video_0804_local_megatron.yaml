@@ -13,11 +13,11 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_3d_2605"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_0804"
   metric_name: "val:val_loss"
   higher_is_better: false
   keep_top_k: 3
-  save_period: 41  # 1324 rows / gbs 32 ~= 42 steps/epoch (no val holdout)
+  save_period: 220
   checkpoint_must_save_by: null
 
 policy:
@@ -38,8 +38,8 @@ policy:
       optimizer_cpu_offload: true
       optimizer_offload_fraction: 1.0
     scheduler:
-      lr_decay_iters: 123  # 1324 rows / gbs 32 ~= 42 steps/epoch x 3 epochs
-      lr_warmup_iters: 13  # ~10% warmup
+      lr_decay_iters: 660
+      lr_warmup_iters: 66
 
 data:
   _override_: true
@@ -52,9 +52,8 @@ data:
   seed: 42
   train:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_3d_2605/arrow_train
+    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_0804
     split: train
-    split_validation_size: 0  # train on ALL rows; no derived 5% val holdout
   validation: null
   default:
     prompt_file: null
@@ -63,24 +62,16 @@ data:
     skip_missing_local_media_filter: true
     roles_to_train_on: ["assistant"]
 
-# 8-GPU run: with tensor_model_parallel_size=2 this is 4 model replicas
-# (TP spans 2 GPUs each), data-parallel = 4. train_global_batch_size stays 32
-# so steps-per-epoch (~42) and the LR schedule (lr_decay_iters: 123) are
-# unchanged from the 2-GPU/DP=1 run -- only throughput changes (~4x).
-cluster:
-  gpus_per_node: 8
-  num_nodes: 1
-
 logger:
-  log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+  log_dir: "logs/sft_qwen35_4b_mcqa_video_0804"
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_0804"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    name: "sft_qwen35_4b_mcqa_video_0804"
   tensorboard:
-    log_dir: "logs/sft_qwen35_4b_mcqa_video_3d_2605"
+    log_dir: "logs/sft_qwen35_4b_mcqa_video_0804"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_4b_mcqa_video_3d_2605"
+    run_name: "sft_qwen35_4b_mcqa_video_0804"

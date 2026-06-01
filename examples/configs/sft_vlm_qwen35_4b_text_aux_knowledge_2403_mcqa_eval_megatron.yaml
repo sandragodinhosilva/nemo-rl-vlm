@@ -1,0 +1,96 @@
+defaults:
+  - sft_vlm_qwen35_4b_text_local_common_megatron.yaml
+
+# Text auxiliary SFT for knowledge-style text tasks (`2403` manifest group).
+#
+# Train on the manifest-approved non-reasoning datasets via colocated OpenAI-format exports:
+# - /mnt/data/shared/vlm/data/text_aux_datasets/clinical_reasoning_natural_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/exercise_instructions_natural_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/technical_tips_natural_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_correction_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_recognition_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_muscle_exercise_2403/openai_sft/train.jsonl
+# - /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_phase_sequencing_2403/openai_sft/train.jsonl
+#
+# Validate on the MCQA export validation splits only.
+
+sft:
+  max_num_epochs: 4
+  max_num_steps: 1000000
+  val_period: 59
+  val_batches: 16
+  val_global_batch_size: 64
+  val_micro_batch_size: 8
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 4
+  save_period: 59
+  checkpoint_must_save_by: null
+
+policy:
+  megatron_cfg:
+    scheduler:
+      lr_decay_iters: 236
+      lr_warmup_iters: 24
+
+data:
+  train:
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/clinical_reasoning_natural_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/exercise_instructions_natural_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/technical_tips_natural_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_correction_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_recognition_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_muscle_exercise_2403/openai_sft/train.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_phase_sequencing_2403/openai_sft/train.jsonl
+      split: train
+  validation:
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_correction_2403/openai_sft/validation.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_error_recognition_2403/openai_sft/validation.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_muscle_exercise_2403/openai_sft/validation.jsonl
+      split: train
+    - dataset_name: openai_format
+      data_path: /mnt/data/shared/vlm/data/text_aux_datasets/mcqa_phase_sequencing_2403/openai_sft/validation.jsonl
+      split: train
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_text_aux_knowledge_2403_mcqa_eval"

@@ -1,0 +1,86 @@
+defaults:
+  - sft_vlm_qwen35_4b_video_local_common_megatron.yaml
+
+# Reasoning-trace variant of the mcqa_video_1405 SFT. Trains on the
+# skeleton-partitioned reasoning dataset (mcqa_video_1405_reasoning/arrow_train):
+# 1030 rows -- 923 with verified-faithful <think> traces (Qwen3.5-397B teacher,
+# Stage B judged), 107 answer-only (their trace was judged unfaithful and
+# stripped to the bare answer letter). ~50% of rows use skeleton-overlay frames,
+# ~50% plain (the skeleton/plain experiment; skeleton traces judged 92.1%
+# faithful vs 87.0% plain). Counterpart to the answer-only
+# sft_vlm_qwen35_4b_mcqa_video_1405_skel run -- the reasoning-vs-answer-only
+# experiment, both arms on the same 50/50 frame partition.
+
+sft:
+  max_num_epochs: 3
+  max_num_steps: 1000000
+  val_period: 25
+  val_batches: 8
+  val_global_batch_size: 32
+  val_micro_batch_size: 1
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_mcqa_video_1405_reasoning"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 3
+  save_period: 32  # 1030 rows / gbs 32 ~= 32 steps/epoch (no val holdout)
+  checkpoint_must_save_by: null
+
+policy:
+  # Long-video OOM fix (see the answer-only 1405 config). The decisive knob is
+  # megatron_cfg.attention_backend: "flash" -- without it TE falls back to the
+  # unfused fp32 softmax and OOMs. Reasoning traces lengthen the assistant
+  # turns, so the 65K sequence budget matters more here than for answer-only.
+  max_total_sequence_length: 65536
+  train_micro_batch_size: 1
+  megatron_cfg:
+    activation_checkpointing: true
+    sequence_parallel: true
+    attention_backend: "flash"
+    context_parallel_size: 1  # flash + sequence_parallel handles 65K; CP not needed
+    optimizer:
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+    scheduler:
+      lr_decay_iters: 96   # 1030 rows / gbs 32 ~= 32 steps/epoch x 3 epochs
+      lr_warmup_iters: 10  # ~10% warmup
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 16
+  seed: 42
+  train:
+    dataset_name: thrive-vlm-sft
+    data_path: /mnt/data/shared/vlm/data/video_aux_datasets/mcqa_video_1405_reasoning/arrow_train
+    split: train
+    split_validation_size: 0  # train on ALL rows; no derived 5% val holdout
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_mcqa_video_1405_reasoning"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_mcqa_video_1405_reasoning"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_mcqa_video_1405_reasoning"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_mcqa_video_1405_reasoning"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_mcqa_video_1405_reasoning"

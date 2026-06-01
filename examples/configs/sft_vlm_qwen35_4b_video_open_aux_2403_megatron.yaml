@@ -1,0 +1,86 @@
+defaults:
+  - sft_vlm_qwen35_4b_video_local_common_megatron.yaml
+
+# Broad open-video auxiliary SFT for the active promoted `2403` video line.
+
+sft:
+  max_num_epochs: 3
+  max_num_steps: 1000000
+  val_period: 100
+  val_batches: 8
+  val_global_batch_size: 32
+  val_micro_batch_size: 1
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_video_open_aux_2403"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 4
+  save_period: 148
+  checkpoint_must_save_by: null
+
+policy:
+  megatron_cfg:
+    scheduler:
+      lr_decay_iters: 444
+      lr_warmup_iters: 45
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 16
+  seed: 42
+  train:
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/video_aux_datasets/body_region_2403/train
+      split: train
+      split_validation_size: 0.05
+      seed: ${sft.seed}
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/video_aux_datasets/breathing_guidance_natural_2403/train
+      split: train
+      split_validation_size: 0.05
+      seed: ${sft.seed}
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/video_aux_datasets/description_generation_natural_2403/train
+      split: train
+      split_validation_size: 0.05
+      seed: ${sft.seed}
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/video_aux_datasets/exercise_name_identification_natural_2403/train
+      split: train
+      split_validation_size: 0.05
+      seed: ${sft.seed}
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/video_aux_datasets/muscles_involved_natural_2403/train
+      split: train
+      split_validation_size: 0.05
+      seed: ${sft.seed}
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_video_open_aux_2403"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_video_open_aux_2403"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_video_open_aux_2403"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_video_open_aux_2403"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_video_open_aux_2403"

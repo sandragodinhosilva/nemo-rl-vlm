@@ -1,0 +1,181 @@
+defaults: sft.yaml
+
+# Oracle-obs (categorical) + LLM-FMS union SFT.
+# TARGET dataset: /mnt/data/sgsilva/datasets/1105_oracle_obs_cat_plus_llm_fms_sft_train
+#   - 20,054 rows = 3,814 oracle_obs_cat (video reps, [VISUAL OBSERVATIONS]
+#     block, empty <think></think> prefix) + 16,240 llm_fms (single-image
+#     keyframes, numbered categorical answers, empty <think></think> prefix).
+#   - Built by: in-line script (sibling of build_sft_from_oracle_obs.py),
+#     unions the empty-think oracle dataset with the llm_fms subset of
+#     human_reps_plus_llm_fms_merged.
+#   - Both row types share the empty-<think> target convention. The nemo-rl
+#     loader's `_strip_empty_reasoning_template_wrapper` /
+#     `_strip_leading_empty_reasoning_wrapper_before_real_trace` helpers
+#     handle either convention, so the format is safe.
+#   - need_to_flip: True on oracle rows (member-POV requirement), False on
+#     llm_fms (single static keyframes — no mirroring).
+#
+# Step math (verified against thrive_vlm internal 95/5 train/val split):
+#   train rows: 19,051   steps/epoch: 595   3 epochs: 1,785 steps
+#   lr_decay_iters: 1785   lr_warmup_iters: 178   save_period: 595
+
+sft:
+  max_num_epochs: 3
+  max_num_steps: 1000000
+  val_period: 100000
+  val_batches: 8
+  val_global_batch_size: 16
+  val_micro_batch_size: 1
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 3
+  save_period: 595          # save at end of each epoch
+  checkpoint_must_save_by: null
+
+policy:
+  model_name: /mnt/data/shared/models/Qwen3.5-27B/
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template: null  # use the model's bundled chat_template.jinja (handles video/image tokens)
+    chat_template_kwargs:
+      enable_thinking: true
+  train_global_batch_size: 32
+  train_micro_batch_size: 1
+  max_total_sequence_length: 65536
+  precision: "bfloat16"
+
+  offload_optimizer_for_logprob: false
+
+  dtensor_cfg:
+    enabled: false
+
+  dynamic_batching:
+    enabled: false
+
+  sequence_packing:
+    enabled: false
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.train_micro_batch_size}}
+    algorithm: "modified_first_fit_decreasing"
+    sequence_length_round: 64
+
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  max_grad_norm: 1.0
+  optimizer: null
+  scheduler: null
+
+  megatron_cfg:
+    enabled: true
+    empty_unused_memory_level: 1
+    activation_checkpointing: true
+    tensor_model_parallel_size: 4
+    pipeline_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 1
+    sequence_parallel: true
+    context_parallel_size: 1
+    pipeline_dtype: ${policy.precision}
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    freeze_moe_router: false
+    moe_router_dtype: "fp64"
+    moe_router_load_balancing_type: "none"
+    moe_router_bias_update_rate: 0.0
+    moe_permute_fusion: false
+    moe_token_dispatcher_type: "alltoall"
+    moe_grouped_gemm: true
+    moe_per_layer_logging: false
+    apply_rope_fusion: false
+    bias_activation_fusion: true
+    attention_backend: "flash"
+    defer_fp32_logits: false
+
+    optimizer:
+      optimizer: "adam"
+      lr: 5e-6
+      min_lr: 5e-7
+      weight_decay: 0.01
+      bf16: true
+      fp16: false
+      params_dtype: "float32"
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1e-8
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      clip_grad: ${policy.max_grad_norm}
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+
+    scheduler:
+      start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      weight_decay_incr_style: "constant"
+      lr_decay_style: "cosine"
+      lr_decay_iters: 1785   # 3 epochs * 595 steps
+      lr_warmup_iters: 178   # ~10% of decay
+      lr_warmup_init: 0
+
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      average_in_collective: true
+      use_custom_fsdp: false
+      data_parallel_sharding_strategy: "optim_grads_params"
+
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: true
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 8
+  seed: 42
+  train:
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/sgsilva/datasets/1105_oracle_obs_cat_plus_llm_fms_sft_train
+      split: train
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  wandb_enabled: false
+  tensorboard_enabled: true
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_27b_oracle_obs_cat_plus_llm_fms"
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 4

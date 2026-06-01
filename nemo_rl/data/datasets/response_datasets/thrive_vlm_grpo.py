@@ -220,6 +220,7 @@ def prepare_thrive_vlm_grpo_dataset(
         train_dataset = raw
         val_dataset = raw
 
+
     # Format - add task_name column if not present
     # Note: Keep dataset_type column as is (it contains data categories like "repetition", "severity")
     # and add a separate task_name column for GRPO environment matching

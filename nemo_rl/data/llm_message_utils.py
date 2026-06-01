@@ -34,6 +34,41 @@ Tensor = torch.Tensor
 TokenizerType = PreTrainedTokenizerBase
 
 
+def _strip_empty_reasoning_template_wrapper(text: str) -> str:
+    text = re.sub(
+        r"(<\|im_start\|>assistant\n)\s*<(?:think|thinking)>\s*</(?:think|thinking)>\s*",
+        r"\1",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"^\s*<(?:think|thinking)>\s*</(?:think|thinking)>\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return text
+
+
+def _strip_leading_empty_reasoning_wrapper_before_real_trace(text: str) -> str:
+    """Drop a leading empty think wrapper only when a real think block follows.
+
+    Some reasoning datasets serialize assistant targets as:
+      <think></think><think>...real trace...</think>
+    We want to keep the real reasoning trace but avoid teaching the model to emit
+    the redundant empty wrapper first.
+    """
+    return re.sub(
+        r"^\s*<(?:think|thinking)>\s*</(?:think|thinking)>\s*(?=<(?:think|thinking)>\s*\S)",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
 def message_log_to_flat_messages(
     message_log: LLMMessageLogType,
 ) -> FlatMessagesType:
@@ -360,9 +395,17 @@ def batched_message_log_to_flat_message(
     result = BatchedDataDict()
     for key in all_keys:
         values = [seq.get(key) for seq in sequenced_lists]
-        # if the values are PackedTensors, create a new PackedTensor from the list of values
-        if values and isinstance(values[0], PackedTensor):
-            result[key] = PackedTensor.flattened_concat(values)
+        # Packed multimodal keys are optional per sample in mixed-modality SFT
+        # batches. Concatenate only the present PackedTensor values and ignore
+        # missing entries instead of assuming every sequence carries the key.
+        packed_values = [v for v in values if isinstance(v, PackedTensor)]
+        if packed_values:
+            exemplar = packed_values[0]
+            filled_packed_values = [
+                v if isinstance(v, PackedTensor) else PackedTensor.empty_like(exemplar)
+                for v in values
+            ]
+            result[key] = PackedTensor.flattened_concat(filled_packed_values)
             continue
         if not values or not isinstance(values[0], Tensor):
             result[key] = values
@@ -434,10 +477,29 @@ def get_images_from_message(message: dict[str, Any]) -> list[Any]:
     # iterate over the content list
     images = []
     for item in message["content"]:
-        if item["type"] == "image":
-            images.extend(list(item["image"])) if isinstance(
-                item["image"], (list, tuple)
-            ) else images.append(item["image"])
+        item_type = item.get("type")
+        if item_type is None:
+            if "image" in item:
+                item_type = "image"
+            elif "image_url" in item:
+                item_type = "image_url"
+            elif "video" in item:
+                item_type = "video"
+            elif "text" in item:
+                item_type = "text"
+
+        if item_type == "image":
+            image_value = item.get("image", item.get("url"))
+            if image_value is not None:
+                images.extend(list(image_value)) if isinstance(
+                    image_value, (list, tuple)
+                ) else images.append(image_value)
+        elif item_type == "image_url":
+            image_url = item.get("image_url")
+            if isinstance(image_url, dict):
+                image_url = image_url.get("url")
+            if image_url is not None:
+                images.append(image_url)
     return images
 
 
@@ -452,7 +514,18 @@ def get_videos_from_message(message: dict[str, Any]) -> list[Any]:
     # iterate over the content list
     videos = []
     for item in message["content"]:
-        if item["type"] == "video":
+        item_type = item.get("type")
+        if item_type is None:
+            if "video" in item:
+                item_type = "video"
+            elif "image" in item:
+                item_type = "image"
+            elif "image_url" in item:
+                item_type = "image_url"
+            elif "text" in item:
+                item_type = "text"
+
+        if item_type == "video":
             videos.extend(list(item["video"])) if isinstance(
                 item["video"], (list, tuple)
             ) else videos.append(item["video"])
@@ -483,8 +556,90 @@ def get_formatted_message_log(
     """
     new_message_log: LLMMessageLogType = []
     prev_formatted_message = ""
+    normalized_message_log: LLMMessageLogType = []
+
+    def _ensure_multimodal_text_starts_on_newline(
+        content: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep user text visually separated from preceding multimodal tokens.
+
+        When Qwen processors serialize a user message containing video/image items
+        followed by text, the decoded preview can place the first text token
+        immediately after `<|vision_end|>`. Prefix a single newline on the first
+        text item that follows image/video content so the rendered prompt is easier
+        to inspect and stays consistent across modalities.
+        """
+        saw_visual_item = False
+        normalized_content = []
+        for item in content:
+            if not isinstance(item, dict):
+                normalized_content.append(item)
+                continue
+
+            normalized_item = item.copy()
+            item_type = normalized_item.get("type")
+            if item_type in {"image", "image_url", "video"}:
+                saw_visual_item = True
+            elif item_type == "text" and saw_visual_item:
+                text = str(normalized_item.get("text", ""))
+                if text and not text.startswith(("\n", "\r")):
+                    normalized_item["text"] = "\n" + text
+                saw_visual_item = False
+            normalized_content.append(normalized_item)
+        return normalized_content
+
+    for message in message_log:
+        normalized_message = message.copy()
+        content = normalized_message.get("content")
+        if isinstance(content, list):
+            normalized_content = []
+            for item in content:
+                if not isinstance(item, dict):
+                    normalized_content.append(item)
+                    continue
+
+                normalized_item = item.copy()
+                if "type" not in normalized_item:
+                    if "image" in normalized_item:
+                        normalized_item["type"] = "image"
+                    elif "image_url" in normalized_item:
+                        normalized_item["type"] = "image_url"
+                    elif "video" in normalized_item:
+                        normalized_item["type"] = "video"
+                    elif "text" in normalized_item:
+                        normalized_item["type"] = "text"
+                normalized_content.append(normalized_item)
+            if normalized_message.get("role") == "user":
+                normalized_content = _ensure_multimodal_text_starts_on_newline(
+                    normalized_content
+                )
+            normalized_message["content"] = normalized_content
+            content = normalized_content
+
+        if normalized_message.get("role") != "user" and isinstance(content, list):
+            role = str(normalized_message.get("role"))
+            text_items: list[str] = []
+            invalid_types: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    invalid_types.append(type(item).__name__)
+                    continue
+                if item.get("type") == "text":
+                    text_items.append(str(item.get("text", "")))
+                else:
+                    invalid_types.append(str(item.get("type")))
+            if invalid_types:
+                invalid_types_str = ", ".join(sorted(set(invalid_types)))
+                raise ValueError(
+                    "Non-user messages must be text-only. Move multimodal content "
+                    "out of roles other than user. "
+                    f"Role: {role}. Found: {invalid_types_str}."
+                )
+            normalized_message["content"] = "\n".join(text_items)
+        normalized_message_log.append(normalized_message)
+
     message_log_strs: list[dict[str, str]] = cast(
-        list[dict[str, str]], message_log
+        list[dict[str, str]], normalized_message_log
     )  # we just use the str:str parts here
 
     multimodal_keys = get_multimodal_keys_from_processor(tokenizer)
@@ -612,11 +767,15 @@ def get_formatted_message_log(
         """
 
         # Store the original content to preserve reasoning tokens if they exist
-        has_original_reasoning_tokens = "<think>" in message.get("content", "")
+        has_original_reasoning_tokens = bool(
+            re.search(r"<(?:think|thinking)>", str(message.get("content", "")), re.IGNORECASE)
+        )
+        # Remove only the redundant empty wrapper that sometimes precedes a real
+        # reasoning trace in assistant targets.
+        message_chunk = _strip_leading_empty_reasoning_wrapper_before_real_trace(message_chunk)
         # Handle reasoning tokens: only preserve them if they were in the original message
         if not has_original_reasoning_tokens:
-            # Remove any <think> </think> tags that the tokenizer may have added
-            message_chunk = message_chunk.replace("\n<think>\n\n</think>\n", "")
+            message_chunk = _strip_empty_reasoning_template_wrapper(message_chunk)
 
         if i == 0:
             if add_bos_token:
@@ -695,9 +854,20 @@ def get_formatted_message_log(
                     "add_special_tokens": False,
                 }
                 if len(images_cur_message) > 0:
-                    processor_kwargs["images"] = images_cur_message
+                    # Preserve the existing single-image calling convention, but
+                    # group multi-image single-sample inputs so Qwen processors
+                    # do not mistake them for a batch of independent prompts.
+                    processor_kwargs["images"] = (
+                        [images_cur_message]
+                        if len(images_cur_message) > 1
+                        else images_cur_message
+                    )
                 if len(videos_cur_message) > 0:
-                    processor_kwargs["videos"] = videos_cur_message
+                    processor_kwargs["videos"] = (
+                        [videos_cur_message]
+                        if len(videos_cur_message) > 1
+                        else videos_cur_message
+                    )
 
                 processed_chunk = tokenizer(**processor_kwargs)
 

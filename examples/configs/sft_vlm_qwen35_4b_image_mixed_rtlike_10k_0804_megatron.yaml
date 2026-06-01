@@ -1,0 +1,64 @@
+defaults:
+  - sft_vlm_qwen35_4b_image_local_common_megatron.yaml
+
+# Historical alias config for the canonical image_10k_0804 dataset.
+
+sft:
+  max_num_epochs: 4
+  max_num_steps: 1000000
+  val_period: 79
+  val_batches: 8
+  val_global_batch_size: 64
+  val_micro_batch_size: 8
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_image_mixed_rtlike_10k_0804"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 4
+  save_period: 156
+  checkpoint_must_save_by: null
+
+policy:
+  megatron_cfg:
+    scheduler:
+      lr_decay_iters: 624
+      lr_warmup_iters: 63
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: true
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 8
+  seed: 42
+  train:
+    - dataset_name: thrive-vlm-sft
+      data_path: /mnt/data/shared/vlm/data/merged_aux_datasets/image_10k_0804
+      split: train
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_image_mixed_rtlike_10k_0804"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_image_mixed_rtlike_10k_0804"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_image_mixed_rtlike_10k_0804"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_image_mixed_rtlike_10k_0804"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_image_mixed_rtlike_10k_0804"

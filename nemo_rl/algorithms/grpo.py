@@ -80,7 +80,10 @@ from nemo_rl.utils.logger import (
 from nemo_rl.utils.memory_tracker import MemoryTracker
 from nemo_rl.utils.nsys import maybe_gpu_profile_step
 from nemo_rl.utils.timer import TimeoutChecker, Timer
-from nemo_rl.utils.venvs import create_local_venv_on_each_node
+from nemo_rl.utils.venvs import (
+    create_local_venv_on_each_node,
+    get_virtual_env_for_python_executable,
+)
 
 # ===============================================================================
 # Configuration
@@ -2480,14 +2483,19 @@ def async_grpo_train(
             _replay_py_exec,
             "nemo_rl.algorithms.async_utils.ReplayBuffer",
         )
+    _replay_env_vars = dict(os.environ)
+    replay_venv_root = get_virtual_env_for_python_executable(_replay_py_exec)
+    if replay_venv_root is not None:
+        _replay_env_vars.update(
+            {
+                "VIRTUAL_ENV": replay_venv_root,
+                "UV_PROJECT_ENVIRONMENT": replay_venv_root,
+            }
+        )
 
     _replay_runtime_env = {
         "py_executable": _replay_py_exec,
-        "env_vars": {
-            **os.environ,
-            "VIRTUAL_ENV": _replay_py_exec,
-            "UV_PROJECT_ENVIRONMENT": _replay_py_exec,
-        },
+        "env_vars": _replay_env_vars,
     }
 
     # Calculate optimal buffer size based on generation limits to prevent length bias
@@ -2511,14 +2519,19 @@ def async_grpo_train(
             _tc_py_exec,
             "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector",
         )
+    _tc_env_vars = dict(os.environ)
+    tc_venv_root = get_virtual_env_for_python_executable(_tc_py_exec)
+    if tc_venv_root is not None:
+        _tc_env_vars.update(
+            {
+                "VIRTUAL_ENV": tc_venv_root,
+                "UV_PROJECT_ENVIRONMENT": tc_venv_root,
+            }
+        )
 
     _tc_runtime_env = {
         "py_executable": _tc_py_exec,
-        "env_vars": {
-            **os.environ,
-            "VIRTUAL_ENV": _tc_py_exec,
-            "UV_PROJECT_ENVIRONMENT": _tc_py_exec,
-        },
+        "env_vars": _tc_env_vars,
     }
 
     # Initialize trajectory collector with synchronized collection

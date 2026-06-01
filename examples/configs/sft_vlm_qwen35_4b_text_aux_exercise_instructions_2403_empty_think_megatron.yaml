@@ -1,0 +1,65 @@
+defaults:
+  - sft_vlm_qwen35_4b_text_local_common_megatron.yaml
+
+# Text auxiliary SFT for the exercise instructions reference dataset patched
+# with empty think tags in assistant messages.
+#
+# Dataset:
+# - /mnt/data/shared/vlm/data/text_aux_datasets/exercise_instructions_natural_2403/openai_sft
+#
+# This export already provides OpenAI-format JSONL train/validation splits and
+# includes empty think wrappers in assistant messages.
+
+sft:
+  max_num_epochs: 4
+  max_num_steps: 1000000
+  val_period: 3
+  val_batches: 4
+  val_global_batch_size: 64
+  val_micro_batch_size: 8
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 4
+  save_period: 3
+  checkpoint_must_save_by: null
+
+policy:
+  megatron_cfg:
+    scheduler:
+      lr_decay_iters: 12
+      lr_warmup_iters: 2
+
+data:
+  train:
+    dataset_name: openai_format
+    data_path: /mnt/data/shared/vlm/data/text_aux_datasets/exercise_instructions_natural_2403/openai_sft/train.jsonl
+    split: train
+  validation:
+    dataset_name: openai_format
+    data_path: /mnt/data/shared/vlm/data/text_aux_datasets/exercise_instructions_natural_2403/openai_sft/validation.jsonl
+    split: train
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    roles_to_train_on: ["assistant"]
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_text_aux_exercise_instructions_2403_empty_think"

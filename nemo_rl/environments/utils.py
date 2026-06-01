@@ -18,7 +18,10 @@ from hydra.utils import get_object
 
 from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
 from nemo_rl.environments.interfaces import EnvironmentInterface
-from nemo_rl.utils.venvs import create_local_venv_on_each_node
+from nemo_rl.utils.venvs import (
+    create_local_venv_on_each_node,
+    get_virtual_env_for_python_executable,
+)
 
 
 # Environment registry entry schema.
@@ -127,10 +130,12 @@ def create_env(env_name: str, env_config: dict, **kwargs) -> EnvironmentInterfac
             actor_py_exec,
             actor_class_fqn,
         )
-        extra_env_vars = {
-            "VIRTUAL_ENV": actor_py_exec,
-            "UV_PROJECT_ENVIRONMENT": actor_py_exec,
-        }
+        venv_root = get_virtual_env_for_python_executable(actor_py_exec)
+        if venv_root is not None:
+            extra_env_vars = {
+                "VIRTUAL_ENV": venv_root,
+                "UV_PROJECT_ENVIRONMENT": venv_root,
+            }
     env = actor_class.options(  # type: ignore # it's wrapped with ray.remote
         runtime_env={
             "py_executable": actor_py_exec,
