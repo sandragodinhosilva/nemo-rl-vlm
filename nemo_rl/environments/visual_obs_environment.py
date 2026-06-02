@@ -26,20 +26,20 @@ from nemo_rl.environments.interfaces import (
     EnvironmentReturn,
 )
 from nemo_rl.environments.judge_config import JudgeConfig
-from nemo_rl.environments.thrive_vlm_aux_rewards import (
+from nemo_rl.environments.visual_obs_aux_rewards import (
     AUX_TASK_TYPES,
     compute_aux_reward,
 )
-from nemo_rl.environments.thrive_vlm_comparison_rewards import (
+from nemo_rl.environments.visual_obs_comparison_rewards import (
     compute_comparison_reward,
 )
-from nemo_rl.environments.thrive_vlm_full_exercise_rewards import (
+from nemo_rl.environments.visual_obs_full_exercise_rewards import (
     compute_full_exercise_reward,
 )
-from nemo_rl.environments.thrive_vlm_rep_rewards import (
+from nemo_rl.environments.visual_obs_rep_rewards import (
     compute_rep_reward,
 )
-from nemo_rl.environments.thrive_vlm_visual_obs_rewards import (
+from nemo_rl.environments.visual_obs_rewards import (
     compute_visual_obs_reward,
 )
 from nemo_rl.environments.metrics import (

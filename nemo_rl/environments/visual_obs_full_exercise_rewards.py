@@ -18,7 +18,7 @@ import math
 import re
 from typing import Optional
 
-from nemo_rl.environments.thrive_vlm_reward_utils import (
+from nemo_rl.environments.visual_obs_reward_utils import (
     Q_ORDINALS,
     extract_injury_risk,
     extract_movement_score,
