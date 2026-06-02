@@ -24,6 +24,16 @@ uv run python examples/run_sft.py \
 
 Refer to `examples/configs/sft.yaml` for a full list of parameters that can be overridden.
 
+If you want to start a fresh run without resuming from checkpoints already present in
+`checkpointing.checkpoint_dir`, add `--ignore-previous`. This keeps the configured
+checkpoint root untouched and writes new checkpoints to a fresh timestamped directory.
+
+```sh
+uv run python examples/run_sft.py \
+  --config examples/configs/sft.yaml \
+  --ignore-previous
+```
+
 ## SFT Multi-node
 
 ```sh

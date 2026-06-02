@@ -7,7 +7,7 @@ grpo:
 
 checkpointing:
   enabled: false
-  checkpoint_dir: "results/grpo_8b_megatron"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo_8b_megatron"
   checkpoint_must_save_by: null
 
 policy:

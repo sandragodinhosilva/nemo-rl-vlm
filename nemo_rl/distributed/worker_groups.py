@@ -31,6 +31,7 @@ from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 from nemo_rl.distributed.worker_group_utils import recursive_merge_options
 from nemo_rl.utils.venvs import (
     create_local_venv_on_each_node,
+    get_virtual_env_for_python_executable,
 )
 
 
@@ -129,6 +130,56 @@ class MultiWorkerFuture:
 
 
 class RayWorkerBuilder:
+    @staticmethod
+    def _load_worker_class(ray_actor_class_fqn: str) -> type[Any]:
+        module_name, class_name = ray_actor_class_fqn.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+
+    @staticmethod
+    def _create_actor_handle(
+        worker_class: type[Any],
+        init_args: tuple[Any, ...],
+        init_kwargs: dict[str, Any],
+        placement_group: PlacementGroup,
+        placement_group_bundle_index: int,
+        num_gpus: float | int,
+        bundle_indices: Optional[tuple] = None,
+        **extra_options: Optional[dict[str, Any]],
+    ) -> ray.actor.ActorHandle:
+        """Instantiate a Ray actor handle with worker-specific overrides."""
+        worker_kwargs = dict(init_kwargs)
+        default_options = getattr(worker_class, "_default_options", {})
+        options = recursive_merge_options(default_options, extra_options)
+
+        if hasattr(worker_class, "configure_worker"):
+            resources, env_vars, init_kwargs_update = worker_class.configure_worker(
+                num_gpus=num_gpus,
+                bundle_indices=bundle_indices,
+            )
+
+            if resources and "num_gpus" in resources:
+                num_gpus = resources["num_gpus"]
+
+            if env_vars:
+                if "runtime_env" not in options:
+                    options["runtime_env"] = {"env_vars": {}}
+                if "env_vars" not in options["runtime_env"]:  # type: ignore
+                    options["runtime_env"]["env_vars"] = {}  # type: ignore
+                for k, v in env_vars.items():
+                    options["runtime_env"]["env_vars"][k] = v  # type: ignore
+
+            if init_kwargs_update:
+                worker_kwargs.update(init_kwargs_update)
+
+        options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
+            placement_group=placement_group,
+            placement_group_bundle_index=placement_group_bundle_index,
+            placement_group_capture_child_tasks=True,
+        )
+        options["num_gpus"] = num_gpus
+        return worker_class.options(**options).remote(*init_args, **worker_kwargs)
+
     @ray.remote
     class IsolatedWorkerInitializer:
         def __init__(self, ray_actor_class_fqn: str, *init_args, **init_kwargs):
@@ -164,50 +215,19 @@ class RayWorkerBuilder:
             Returns:
                 A Ray actor reference to the created worker
             """
-            # Set up worker arguments and resources
-            module_name, class_name = self.ray_actor_class_fqn.rsplit(".", 1)
-            module = importlib.import_module(module_name)
-            worker_class = getattr(module, class_name)
-            worker_kwargs = dict(self.init_kwargs)
-            default_options = getattr(worker_class, "_default_options", {})
-            options = recursive_merge_options(default_options, extra_options)
-
-            # Use the worker's configuration interface if available
-            if hasattr(worker_class, "configure_worker"):
-                # Get complete worker configuration from the worker class
-                resources, env_vars, init_kwargs = worker_class.configure_worker(
-                    num_gpus=num_gpus,
-                    bundle_indices=bundle_indices,
-                )
-
-                # Apply resource configuration
-                if resources and "num_gpus" in resources:
-                    num_gpus = resources["num_gpus"]
-
-                # Apply environment variables if provided
-                if env_vars:
-                    if "runtime_env" not in options:
-                        options["runtime_env"] = {"env_vars": {}}
-                    if "env_vars" not in options["runtime_env"]:  # type: ignore
-                        options["runtime_env"]["env_vars"] = {}  # type: ignore
-                    for k, v in env_vars.items():
-                        options["runtime_env"]["env_vars"][k] = v  # type: ignore
-
-                # Apply initialization parameters
-                if init_kwargs:
-                    worker_kwargs.update(init_kwargs)
-
-            # Create options for Ray actor
-            options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
+            worker_class = RayWorkerBuilder._load_worker_class(
+                self.ray_actor_class_fqn
+            )
+            return RayWorkerBuilder._create_actor_handle(
+                worker_class=worker_class,
+                init_args=self.init_args,
+                init_kwargs=self.init_kwargs,
                 placement_group=placement_group,
                 placement_group_bundle_index=placement_group_bundle_index,
-                placement_group_capture_child_tasks=True,
+                num_gpus=num_gpus,
+                bundle_indices=bundle_indices,
+                **extra_options,
             )
-            options["num_gpus"] = num_gpus
-            worker = worker_class.options(**options).remote(
-                *self.init_args, **worker_kwargs
-            )
-            return worker
 
     def __init__(self, ray_actor_class_fqn: str, *args, **kwargs):
         self.ray_actor_class_fqn = ray_actor_class_fqn
@@ -221,7 +241,7 @@ class RayWorkerBuilder:
         num_gpus: float | int,
         bundle_indices: Optional[tuple[int, list[int]]] = None,
         **extra_options: Any,
-    ) -> tuple[ray.ObjectRef, ray.actor.ActorHandle]:
+    ) -> tuple[ray.ObjectRef, Optional[ray.actor.ActorHandle]]:
         """Create a Ray worker asynchronously, returning futures.
 
         This method returns immediately with futures that can be awaited later.
@@ -238,9 +258,28 @@ class RayWorkerBuilder:
                 - worker_future: A Ray ObjectRef that will resolve to the worker actor
                 - initializer_actor: The initializer actor (needed to prevent GC)
         """
-        # Set up worker arguments and resources
         options = deepcopy(extra_options)
-        initializer_options = {"runtime_env": options["runtime_env"]}
+        try:
+            worker_class = self._load_worker_class(self.ray_actor_class_fqn)
+        except Exception:
+            worker_class = None
+
+        if worker_class is not None:
+            worker = self._create_actor_handle(
+                worker_class=worker_class,
+                init_args=self.args,
+                init_kwargs=self.kwargs,
+                placement_group=placement_group,
+                placement_group_bundle_index=placement_group_bundle_index,
+                num_gpus=num_gpus,
+                bundle_indices=bundle_indices,
+                **options,
+            )
+            return ray.put(worker), None
+
+        initializer_options = {}
+        if "runtime_env" in options:
+            initializer_options["runtime_env"] = options["runtime_env"]
         isolated_initializer = self.IsolatedWorkerInitializer.options(  # type: ignore # @ray.remote call
             **initializer_options
         ).remote(self.ray_actor_class_fqn, *self.args, **self.kwargs)
@@ -297,7 +336,8 @@ class RayWorkerBuilder:
         worker = ray.get(worker_future)
 
         # We hold onto a reference to the initializer actor to avoid gc (would kill the child, 'real' actor)
-        worker._RAY_INITIALIZER_ACTOR_REF_TO_AVOID_GC = isolated_initializer
+        if isolated_initializer is not None:
+            worker._RAY_INITIALIZER_ACTOR_REF_TO_AVOID_GC = isolated_initializer
         return worker
 
 
@@ -531,8 +571,10 @@ class RayWorkerGroup:
                     "env_vars": worker_env_vars,
                     "py_executable": py_executable,
                 }
-                runtime_env["env_vars"]["VIRTUAL_ENV"] = py_executable
-                runtime_env["env_vars"]["UV_PROJECT_ENVIRONMENT"] = py_executable
+                venv_root = get_virtual_env_for_python_executable(py_executable)
+                if venv_root is not None:
+                    runtime_env["env_vars"]["VIRTUAL_ENV"] = venv_root
+                    runtime_env["env_vars"]["UV_PROJECT_ENVIRONMENT"] = venv_root
 
                 extra_options = {"runtime_env": runtime_env, "name": name}
 
@@ -599,7 +641,8 @@ class RayWorkerGroup:
         )
 
         for idx, (worker, (_, initializer)) in enumerate(zip(workers, worker_futures)):
-            worker._RAY_INITIALIZER_ACTOR_REF_TO_AVOID_GC = initializer
+            if initializer is not None:
+                worker._RAY_INITIALIZER_ACTOR_REF_TO_AVOID_GC = initializer
             self._workers.append(worker)
 
             # Get the corresponding metadata

@@ -14,6 +14,7 @@
 
 import os
 import sys
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -354,6 +355,56 @@ def test_environment_variables_setup(register_test_actor, virtual_cluster):
         m_addr, m_port = ray.get(worker_group.workers[i].get_master_addr_port.remote())
         assert m_addr == expected_master_addr
         assert m_port == expected_master_port
+
+    worker_group.shutdown(force=True)
+
+
+def test_system_python_does_not_set_invalid_virtual_env(
+    register_test_actor, virtual_cluster
+):
+    actor_fqn = register_test_actor
+    builder = RayWorkerBuilder(actor_fqn)
+
+    original_virtual_env = os.environ.pop("VIRTUAL_ENV", None)
+    original_uv_project_env = os.environ.pop("UV_PROJECT_ENVIRONMENT", None)
+    try:
+        worker_group = RayWorkerGroup(
+            cluster=virtual_cluster, remote_worker_builder=builder, workers_per_node=1
+        )
+        worker = worker_group.workers[0]
+
+        assert ray.get(worker.get_env_var.remote("VIRTUAL_ENV")) is None
+        assert ray.get(worker.get_env_var.remote("UV_PROJECT_ENVIRONMENT")) is None
+    finally:
+        if original_virtual_env is not None:
+            os.environ["VIRTUAL_ENV"] = original_virtual_env
+        if original_uv_project_env is not None:
+            os.environ["UV_PROJECT_ENVIRONMENT"] = original_uv_project_env
+        if "worker_group" in locals():
+            worker_group.shutdown(force=True)
+
+
+def test_importable_worker_skips_isolated_initializer(
+    register_test_actor, virtual_cluster
+):
+    actor_fqn = register_test_actor
+    builder = RayWorkerBuilder(actor_fqn)
+
+    def _unexpected_initializer_options(**kwargs):
+        raise AssertionError("IsolatedWorkerInitializer should not be used here")
+
+    with patch.object(
+        RayWorkerBuilder.IsolatedWorkerInitializer,
+        "options",
+        side_effect=_unexpected_initializer_options,
+    ):
+        worker_group = RayWorkerGroup(
+            cluster=virtual_cluster, remote_worker_builder=builder, workers_per_node=1
+        )
+
+    assert len(worker_group.workers) == 1
+    result = ray.get(worker_group.workers[0].echo.remote("hello"))
+    assert "hello" in result
 
     worker_group.shutdown(force=True)
 

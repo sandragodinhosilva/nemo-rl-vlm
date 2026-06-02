@@ -28,8 +28,8 @@ WANDB_API_KEY=$WANDB_API_KEY \
 uv run python examples/nemo_gym/run_grpo_nemo_gym.py \
     ++cluster.num_nodes=$NUM_ACTOR_NODES \
     ++logger.wandb.name=$EXP_NAME \
-    ++logger.log_dir=results/$EXP_NAME \
-    ++checkpointing.checkpoint_dir=results/$EXP_NAME \
+    ++logger.log_dir=/mnt/data/sgsilva/checkpoints/$EXP_NAME \
+    ++checkpointing.checkpoint_dir=/mnt/data/sgsilva/checkpoints/$EXP_NAME \
     $@
 EOF
 

@@ -24,11 +24,13 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.chat_templates import COMMON_CHAT_TEMPLATES
 from nemo_rl.data.interfaces import LLMMessageLogType, TaskDataSpec
 from nemo_rl.data.llm_message_utils import (
+    _strip_empty_reasoning_template_wrapper,
     _validate_tensor_consistency,
     add_loss_mask_to_message_log,
     batched_message_log_to_flat_message,
     get_first_index_that_differs,
     get_formatted_message_log,
+    get_images_from_message,
     get_keys_from_message_log,
     message_log_to_flat_messages,
 )
@@ -191,6 +193,157 @@ def test_message_log_to_flat_messages_missing_keys() -> None:
     assert torch.equal(result["input_ids"], torch.tensor([1, 2, 3, 4]))
     assert result["text"] == ["first"]
     assert torch.equal(result["attention_mask"], torch.tensor([1, 1]))
+
+
+def test_get_images_from_message_supports_image_url() -> None:
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "/tmp/example.webp"}},
+            {"type": "text", "text": "Describe this image."},
+        ],
+    }
+
+    assert get_images_from_message(message) == ["/tmp/example.webp"]
+
+
+def test_get_images_from_message_supports_image_with_url_key() -> None:
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "image", "url": "/tmp/example-normalized.webp"},
+            {"type": "text", "text": "Describe this image."},
+        ],
+    }
+
+    assert get_images_from_message(message) == ["/tmp/example-normalized.webp"]
+
+
+def test_get_formatted_message_log_normalizes_text_only_system_list_without_hf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyTokenizer:
+        bos_token = None
+        eos_token = None
+
+        def apply_chat_template(
+            self,
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            add_special_tokens=False,
+            **kwargs,
+        ):
+            assert isinstance(messages[0]["content"], str)
+            return "".join(f"{msg['role']}:{msg['content']}" for msg in messages)
+
+        def __call__(self, text, return_tensors="pt", add_special_tokens=False):
+            return {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int64)}
+
+    monkeypatch.setattr(
+        "nemo_rl.data.llm_message_utils.get_multimodal_keys_from_processor",
+        lambda tokenizer: [],
+    )
+
+    message_log: LLMMessageLogType = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a helpful assistant."}],
+        },
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+    ]
+    task_data_spec = TaskDataSpec(task_name="t")
+
+    out = get_formatted_message_log(
+        message_log,
+        DummyTokenizer(),
+        task_data_spec,
+        add_bos_token=False,
+        add_eos_token=False,
+    )
+
+    assert isinstance(out[0]["content"], str)
+    assert "You are a helpful assistant." in out[0]["content"]
+
+
+
+
+def test_get_formatted_message_log_normalizes_text_only_assistant_list_without_hf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyTokenizer:
+        bos_token = None
+        eos_token = None
+
+        def apply_chat_template(
+            self,
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            add_special_tokens=False,
+            **kwargs,
+        ):
+            assert isinstance(messages[0]["content"], str)
+            assert isinstance(messages[-1]["content"], str)
+            return "".join(f"{msg['role']}:{msg['content']}" for msg in messages)
+
+        def __call__(self, text, return_tensors="pt", add_special_tokens=False):
+            return {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int64)}
+
+    monkeypatch.setattr(
+        "nemo_rl.data.llm_message_utils.get_multimodal_keys_from_processor",
+        lambda tokenizer: [],
+    )
+
+    message_log: LLMMessageLogType = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]},
+    ]
+    task_data_spec = TaskDataSpec(task_name="t")
+
+    out = get_formatted_message_log(
+        message_log,
+        DummyTokenizer(),
+        task_data_spec,
+        add_bos_token=False,
+        add_eos_token=False,
+    )
+
+    assert isinstance(out[2]["content"], str)
+    assert "Hi" in out[2]["content"]
+def test_get_formatted_message_log_rejects_multimodal_system_message() -> None:
+    class DummyTokenizer:
+        bos_token = None
+        eos_token = None
+
+        def apply_chat_template(self, *args, **kwargs):
+            raise AssertionError("apply_chat_template should not be reached")
+
+        def __call__(self, text, return_tensors="pt", add_special_tokens=False):
+            return {"input_ids": torch.tensor([[1]], dtype=torch.int64)}
+
+    message_log: LLMMessageLogType = [
+        {
+            "role": "system",
+            "content": [{"type": "image", "image": "bad.png"}],
+        },
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+    ]
+    task_data_spec = TaskDataSpec(task_name="t")
+
+    with pytest.raises(
+        ValueError, match="Non-user messages must be text-only"
+    ):
+        get_formatted_message_log(
+            message_log,
+            DummyTokenizer(),
+            task_data_spec,
+            add_bos_token=False,
+            add_eos_token=False,
+        )
 
 
 def test_concatenate_messages_different_shapes() -> None:
@@ -530,6 +683,20 @@ def test_get_formatted_message_log_qwen3_enable_thinking(
     assert actual_text == expected_text
 
 
+def test_strip_empty_reasoning_template_wrapper_variants() -> None:
+    with_prefix = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    without_prefix = "\n<thinking>\n   \n</thinking>\n"
+
+    assert _strip_empty_reasoning_template_wrapper(with_prefix) == "<|im_start|>assistant\n"
+    assert _strip_empty_reasoning_template_wrapper(without_prefix) == ""
+
+
+def test_strip_empty_reasoning_template_wrapper_preserves_non_empty_reasoning() -> None:
+    text = "<|im_start|>assistant\n<think>\nreasoning\n</think>\n\nAnswer"
+
+    assert _strip_empty_reasoning_template_wrapper(text) == text
+
+
 @pytest.mark.hf_gated
 def test_formatted_message_log_empty_message():
     message_logs = [
@@ -698,6 +865,46 @@ def test_batched_message_log_to_flat_message_with_packed_images() -> None:
 
 
 @pytest.mark.hf_gated
+def test_get_formatted_message_log_image_url_loads_local_image(tmp_path) -> None:
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+    task_data_spec = TaskDataSpec(task_name="t")
+
+    image_path = tmp_path / "sample.png"
+    Image.new("RGB", (16, 16), color=(255, 0, 0)).save(image_path)
+
+    message_log: LLMMessageLogType = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a helpful assistant."}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": str(image_path)}},
+                {"type": "text", "text": "Describe the image."},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "A red square."}],
+        },
+    ]
+
+    out = get_formatted_message_log(
+        message_log, processor, task_data_spec, add_bos_token=False, add_eos_token=False
+    )
+
+    from nemo_rl.data.multimodal_utils import PackedTensor
+
+    assert isinstance(out[1]["pixel_values"], PackedTensor)
+    assert isinstance(out[1]["image_grid_thw"], PackedTensor)
+    assert out[1]["pixel_values"].as_tensor().numel() > 0
+    assert out[1]["image_grid_thw"].as_tensor().shape == torch.Size([1, 3])
+    assert isinstance(out[1]["token_ids"], torch.Tensor)
+    assert out[1]["token_ids"].numel() > 0
+
+
+@pytest.mark.hf_gated
 def test_get_formatted_message_log_multimodal_prompt_formatting() -> None:
     processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
     task_data_spec = TaskDataSpec(task_name="t")
@@ -791,4 +998,42 @@ def test_get_formatted_message_log_multimodal_prompt_formatting() -> None:
     assert (
         isinstance(out[1]["token_ids"], torch.Tensor)
         and out[1]["token_ids"].numel() > 0
+    )
+
+
+@pytest.mark.hf_gated
+def test_get_formatted_message_log_normalizes_text_only_system_list() -> None:
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+    task_data_spec = TaskDataSpec(task_name="t")
+
+    image = Image.new("RGB", (16, 16), color=(0, 0, 0))
+    message_log: LLMMessageLogType = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a helpful assistant."}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "Describe the image."},
+            ],
+        },
+        {"role": "assistant", "content": "A black square."},
+    ]
+
+    out = get_formatted_message_log(
+        message_log, processor, task_data_spec, add_bos_token=False, add_eos_token=False
+    )
+
+    assert isinstance(out[0]["content"], str)
+    assert "You are a helpful assistant." in out[0]["content"]
+    assert isinstance(out[1]["token_ids"], torch.Tensor)
+    assert out[1]["token_ids"].numel() > 0
+    from nemo_rl.data.multimodal_utils import PackedTensor
+
+    assert isinstance(out[1]["pixel_values"], PackedTensor)
+    assert (
+        isinstance(out[2]["token_ids"], torch.Tensor)
+        and out[2]["token_ids"].numel() > 0
     )

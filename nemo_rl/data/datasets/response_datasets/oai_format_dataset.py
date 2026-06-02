@@ -140,9 +140,26 @@ class OpenAIFormatDataset(RawDataset):
 
         if not use_preserving_dataset:
             # Use the standard HuggingFace approach (faster and more standard)
-            original_dataset = load_dataset("json", data_files=data_path)["train"]
-            # Format the dataset
-            self.dataset = original_dataset.map(self.format_data)
+            try:
+                original_dataset = load_dataset("json", data_files=data_path)["train"]
+                # Keep only the normalized chat fields so heterogeneous metadata columns
+                # from different datasets do not break concatenation during SFT.
+                self.dataset = original_dataset.map(
+                    self.format_data,
+                    remove_columns=original_dataset.column_names,
+                )
+            except Exception as e:
+                warnings.warn(
+                    "OpenAI-format dataset could not be loaded through HuggingFace datasets. "
+                    "Falling back to PreservingDataset for compatibility with heterogeneous multimodal content.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+                with open(data_path, "r") as f:
+                    original_rows = [json.loads(line) for line in f]
+                formatted_data = [self.format_data(item) for item in original_rows]
+                self.dataset = PreservingDataset(formatted_data)
 
             print(
                 f"Loaded dataset using standard approach: {len(self.dataset)} samples."
@@ -185,7 +202,10 @@ class OpenAIFormatDataset(RawDataset):
             )
 
     def format_data(self, data: dict[str, Any]) -> dict[str, Any]:
-        messages = [message for message in data[self.chat_key]]
+        messages_data = data[self.chat_key]
+        if isinstance(messages_data, str):
+            messages_data = json.loads(messages_data)
+        messages = [message for message in messages_data]
         if self.system_key is not None and self.system_key in data:
             messages = [{"role": "system", "content": data[self.system_key]}] + messages
         elif self.system_prompt:

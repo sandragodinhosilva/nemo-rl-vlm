@@ -13,10 +13,15 @@
 # limitations under the License.
 import os
 import subprocess
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from nemo_rl.utils.venvs import create_local_venv
+from nemo_rl.utils.venvs import (
+    create_local_venv,
+    get_nemo_rl_venv_dir,
+    get_virtual_env_for_python_executable,
+)
 from tests.unit.conftest import TEST_ASSETS_DIR
 
 
@@ -48,3 +53,42 @@ def test_create_local_venv():
             # Verify the command executed successfully (return code 0)
             assert result.returncode == 0, f"Failed to import sphinx: {result.stderr}"
             assert "Sphinx package is installed" in result.stdout
+
+
+def test_get_nemo_rl_venv_dir_prefers_home_for_mnt_data_repo():
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("nemo_rl.utils.venvs.git_root", "/mnt/data/sgsilva/nemo-rl-vlm"),
+        patch("nemo_rl.utils.venvs.Path.home", return_value=Path("/home/sgsilva")),
+    ):
+        assert get_nemo_rl_venv_dir() == "/home/sgsilva/nemo-rl-vlm-ray-venvs"
+
+
+def test_get_nemo_rl_venv_dir_respects_override():
+    with patch.dict(
+        os.environ, {"NEMO_RL_VENV_DIR": "/tmp/custom-ray-venvs"}, clear=True
+    ):
+        assert get_nemo_rl_venv_dir() == "/tmp/custom-ray-venvs"
+
+
+def test_get_virtual_env_for_python_executable_detects_real_venv():
+    with TemporaryDirectory() as tempdir:
+        venv_root = Path(tempdir) / "demo_venv"
+        bin_dir = venv_root / "bin"
+        bin_dir.mkdir(parents=True)
+        python_path = bin_dir / "python"
+        python_path.write_text("")
+        (venv_root / "pyvenv.cfg").write_text("home = /usr/bin\n")
+
+        assert get_virtual_env_for_python_executable(str(python_path)) == str(
+            venv_root
+        )
+
+
+def test_get_virtual_env_for_python_executable_ignores_non_venv_python():
+    with TemporaryDirectory() as tempdir:
+        python_path = Path(tempdir) / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text("")
+
+        assert get_virtual_env_for_python_executable(str(python_path)) is None

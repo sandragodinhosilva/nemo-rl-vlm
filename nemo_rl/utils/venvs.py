@@ -30,6 +30,49 @@ DEFAULT_VENV_DIR = os.path.join(git_root, "venvs")
 logger = logging.getLogger(__name__)
 
 
+def get_nemo_rl_venv_dir() -> str:
+    """Resolve the base directory used for Ray worker virtual environments.
+
+    Environment override wins. Otherwise, prefer a `/home` cache when the repo
+    itself lives on `/mnt/data`, which avoids bootstrapping worker envs from a
+    known-problematic mount in some cluster setups.
+    """
+    configured_dir = os.environ.get("NEMO_RL_VENV_DIR")
+    if configured_dir:
+        return os.path.normpath(configured_dir)
+
+    home_dir = Path.home()
+    if str(git_root).startswith("/mnt/data/") and str(home_dir).startswith("/home/"):
+        return os.path.normpath(str(home_dir / "nemo-rl-vlm-ray-venvs"))
+
+    return os.path.normpath(DEFAULT_VENV_DIR)
+
+
+def get_virtual_env_for_python_executable(py_executable: str) -> str | None:
+    """Return the venv root for a Python executable, if it belongs to a venv.
+
+    Ray runtime environments accept a Python executable, but environment variables
+    like ``VIRTUAL_ENV`` and ``UV_PROJECT_ENVIRONMENT`` must point to the venv
+    directory itself rather than the ``bin/python`` path.
+    """
+    try:
+        exec_path = Path(py_executable).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if not exec_path.exists():
+        return None
+
+    if exec_path.parent.name not in {"bin", "Scripts"}:
+        return None
+
+    venv_root = exec_path.parent.parent
+    if not (venv_root / "pyvenv.cfg").exists():
+        return None
+
+    return os.path.normpath(str(venv_root))
+
+
 @lru_cache(maxsize=None)
 def create_local_venv(
     py_executable: str, venv_name: str, force_rebuild: bool = False
@@ -58,9 +101,7 @@ def create_local_venv(
     #
     # You can override this location by setting the NEMO_RL_VENV_DIR environment variable
 
-    NEMO_RL_VENV_DIR = os.path.normpath(
-        os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_VENV_DIR)
-    )
+    NEMO_RL_VENV_DIR = get_nemo_rl_venv_dir()
     logger.info(f"NEMO_RL_VENV_DIR is set to {NEMO_RL_VENV_DIR}.")
 
     # Create the venv directory if it doesn't exist
@@ -108,9 +149,7 @@ def _env_builder(
     py_executable: str, venv_name: str, node_idx: int, force_rebuild: bool = False
 ):
     # Check if another node is already building
-    NEMO_RL_VENV_DIR = os.path.normpath(
-        os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_VENV_DIR)
-    )
+    NEMO_RL_VENV_DIR = get_nemo_rl_venv_dir()
     venv_path = Path(NEMO_RL_VENV_DIR) / venv_name
     python_path = venv_path / "bin" / "python"
     started_file = venv_path / "STARTED_ENV_BUILDER"

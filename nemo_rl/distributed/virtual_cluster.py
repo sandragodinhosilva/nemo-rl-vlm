@@ -91,12 +91,22 @@ def _get_free_port_local() -> int:
 def init_ray(log_dir: Optional[str] = None) -> None:
     """Initialise Ray.
 
-    Try to attach to an existing local cluster.
-    If that cluster uses the same CUDA_VISIBLE_DEVICES or Slurm managed tag we will reuse it.
-    Otherwise, we will detach and start a fresh local cluster.
+    When ``RAY_ADDRESS`` is set, attempts to attach to an existing cluster at
+    that address.  The cluster is reused if its ``nrl_tag_*`` resource matches
+    the driver's ``CUDA_VISIBLE_DEVICES``; otherwise Ray is shut down and a
+    fresh local cluster is started on this node.
+
+    When ``RAY_ADDRESS`` is **not** set, auto-discovery is skipped entirely and
+    a fresh local cluster is started immediately.  This prevents accidentally
+    connecting to another job's or another user's Ray cluster that happens to be
+    reachable on the same network (a common problem in multi-tenant SLURM
+    environments where ``ray.init(address="auto")`` finds a neighbouring node's
+    GCS server via broadcast).
 
     Args:
         log_dir: Optional directory to store Ray logs and temp files.
+            Passed as ``_temp_dir`` to ``ray.init``; defaults to
+            ``RAY_TMPDIR`` when *None*.
     """
     # Set up runtime environment
     env_vars = dict(os.environ)
@@ -111,63 +121,50 @@ def init_ray(log_dir: Optional[str] = None) -> None:
     cvd_tag_prefix = "nrl_tag_"
     cvd_tag = f"{cvd_tag_prefix}{cvd.replace(',', '_')}"
 
-    # Try to attach to an existing cluster
-    try:
-        ray.init(
-            address="auto",
-            log_to_driver=True,
-            include_dashboard=False,
-            runtime_env=runtime_env,
-            _temp_dir=os.path.abspath(log_dir) if log_dir else None,
-        )
-
-        cluster_res = ray.cluster_resources()
-
-        # Check reusability for NeMo-RL managed local clusters
-        if any(k.startswith(cvd_tag_prefix) for k in cluster_res):
-            # Reuse if the driver's cvd_tag matches a tag in the cluster.
-            # This is for reusing a previously self-started local cluster.
-            if cvd_tag in cluster_res:
-                logger.info(
-                    f"Connected to existing Ray cluster (driver CVD_TAG '{cvd_tag}' matched): {cluster_res}"
-                )
-                return
-
-            # If neither reuse condition is met, but we connected to *something*
-            logger.info(
-                f"Existing Ray cluster found ({cluster_res}) but it does not meet reuse criteria. "
-                f"Driver's cvd_tag: '{[k for k in cluster_res if k.startswith(cvd_tag_prefix)][0]}'. Expected cvd_tag: '{cvd_tag}'. "
-                "Starting a new local cluster..."
+    # Try to attach to an existing cluster only if RAY_ADDRESS is explicitly set.
+    # Skipping auto-discovery prevents accidentally connecting to another user's or
+    # another job's Ray cluster that happens to be reachable on the same network.
+    ray_address = os.environ.get("RAY_ADDRESS")
+    if ray_address:
+        try:
+            ray.init(
+                address=ray_address,
+                log_to_driver=True,
+                include_dashboard=False,
+                runtime_env=runtime_env,
+                _temp_dir=os.path.abspath(log_dir) if log_dir else None,
             )
-            ray.shutdown()
 
-            # Clear driver-side package cache so working_dir is re-uploaded
-            import importlib
-
-            import ray._private.runtime_env.packaging as _pkg
-
-            importlib.reload(_pkg)
-
-        # Always reuse if it's an externally managed cluster.
-        else:
-            logger.info(f"Connected to existing Ray cluster: {cluster_res}")
+            cluster_res = ray.cluster_resources()
+            logger.info(
+                f"Connected to existing Ray cluster at '{ray_address}': {cluster_res}"
+            )
             return
+        except ConnectionError as e:
+            raise RuntimeError(
+                f"Failed to connect to the existing Ray cluster at '{ray_address}'."
+            ) from e
+    else:
+        logger.debug("RAY_ADDRESS not set, skipping auto-discovery and starting a local cluster.")
 
-    except ConnectionError:
-        logger.debug("No existing Ray cluster found, will start a new one.")
-        # If ConnectionError, proceed to start a new local cluster without further action here.
-        # Clear driver-side package cache so working_dir is re-uploaded
-        ray.shutdown()
-        pass
+    # Start a brand-new local cluster.
+    # If RAY_ADDRESS is still present, Ray will interpret ray.init(...) as
+    # "connect to existing cluster" even without an explicit address, which
+    # forbids local-only args like `resources=...`.
+    os.environ.pop("RAY_ADDRESS", None)
 
-    # Start a brand-new local cluster
     # Reuse `runtime_env` but drop `working_dir` to avoid packaging the whole repo (prevents ray OSError: Failed to download runtime_env file package issue)
     local_runtime_env = dict(runtime_env)
     local_runtime_env.pop("working_dir", None)
 
+    include_dashboard = (
+        os.environ.get("NEMO_RL_INCLUDE_RAY_DASHBOARD", "0").strip().lower()
+        in {"1", "true", "yes"}
+    )
+
     ray.init(
         log_to_driver=True,
-        include_dashboard=True,
+        include_dashboard=include_dashboard,
         runtime_env=local_runtime_env,
         _temp_dir=os.path.abspath(log_dir) if log_dir else None,
         resources={cvd_tag: 1},

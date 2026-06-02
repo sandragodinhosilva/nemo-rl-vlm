@@ -27,18 +27,19 @@ from nemo_rl.data.datasets.response_datasets import OpenAIFormatDataset
 def sample_data(request):
     chat_key = request.param[0]
     system_key = request.param[1]
+    serialize_messages = request.param[2] if len(request.param) > 2 else False
 
+    messages = [
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is Paris."},
+    ]
     data = {
-        chat_key: [
-            {"role": "user", "content": "What is the capital of France?"},
-            {"role": "assistant", "content": "The capital of France is Paris."},
-        ],
+        chat_key: json.dumps(messages) if serialize_messages else messages,
     }
 
     if system_key is not None:
         data[system_key] = "You are a helpful assistant."
 
-    # Create temporary files for train and validation data
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(data, f)
         data_path = f.name
@@ -48,12 +49,11 @@ def sample_data(request):
 
 @pytest.fixture(scope="function")
 def tokenizer():
-    """Initialize tokenizer for the test model."""
     tokenizer = get_tokenizer({"name": "Qwen/Qwen3-0.6B"})
     return tokenizer
 
 
-@pytest.mark.parametrize("sample_data", [("messages", None)], indirect=True)
+@pytest.mark.parametrize("sample_data", [("messages", None, False), ("messages", None, True)], indirect=True)
 def test_dataset_initialization(sample_data):
     data_path = sample_data
     data_config = {
@@ -66,7 +66,7 @@ def test_dataset_initialization(sample_data):
     assert len(dataset.dataset) == 1
 
 
-@pytest.mark.parametrize("sample_data", [("conversations", None)], indirect=True)
+@pytest.mark.parametrize("sample_data", [("conversations", None, False)], indirect=True)
 def test_custom_keys(sample_data):
     data_path = sample_data
     data_config = {
@@ -81,9 +81,8 @@ def test_custom_keys(sample_data):
     assert dataset.system_prompt == "You are a helpful assistant."
 
 
-@pytest.mark.parametrize("sample_data", [("messages", "system_key")], indirect=True)
+@pytest.mark.parametrize("sample_data", [("messages", "system_key", False), ("messages", "system_key", True)], indirect=True)
 def test_message_formatting(sample_data, tokenizer):
-    # load the dataset
     data_path = sample_data
     dataset = OpenAIFormatDataset(
         data_path,
@@ -91,7 +90,6 @@ def test_message_formatting(sample_data, tokenizer):
         system_key="system_key",
     )
 
-    # check the first example
     first_example = dataset.dataset[0]
 
     assert "task_name" in first_example
@@ -102,7 +100,6 @@ def test_message_formatting(sample_data, tokenizer):
     assert first_example["messages"][2]["role"] == "assistant"
     assert first_example["messages"][2]["content"] == "The capital of France is Paris."
 
-    # check the combined message
     chat_template = COMMON_CHAT_TEMPLATES.passthrough_prompt_response
     combined_message = tokenizer.apply_chat_template(
         first_example["messages"],

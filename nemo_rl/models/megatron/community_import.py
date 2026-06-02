@@ -12,12 +12,96 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
+import shutil
+from pathlib import Path
 from typing import Any, Optional
 
 from megatron.bridge import AutoBridge
 
 from nemo_rl.models.policy import MegatronConfig
+
+
+def _resolve_local_hf_asset_source(source_path: str) -> Optional[Path]:
+    """Resolve a HF model id or local path to a local directory containing HF assets."""
+    candidates: list[Path] = []
+    src = Path(source_path)
+
+    if src.is_dir():
+        return src
+
+    # Support configs that use HF ids like "Qwen/Qwen3-VL-4B-Instruct" while
+    # local mirrored assets live under /mnt/data/shared/models/<repo_name>.
+    repo_name = source_path.rstrip("/").split("/")[-1]
+    candidates.extend(
+        [
+            Path("/mnt/data/shared/models") / repo_name,
+            Path("/mnt/data/shared/models") / source_path,
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+
+    return None
+
+
+def _copy_hf_auxiliary_assets(source_path: str, output_path: str, overwrite: bool = False):
+    src = _resolve_local_hf_asset_source(source_path)
+    dst = Path(output_path)
+    if src is None:
+        return
+
+    # Preserve tokenizer, processor, and multimodal metadata files that may not be
+    # written by bridge.save_hf_pretrained for community multimodal models.
+    asset_names = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+        "merges.txt",
+        "vocab.json",
+        "added_tokens.json",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "video_preprocessor_config.json",
+        "generation_config.json",
+    ]
+
+    for name in asset_names:
+        src_file = src / name
+        dst_file = dst / name
+        if not src_file.exists():
+            continue
+        if dst_file.exists() and not overwrite:
+            continue
+        shutil.copy2(src_file, dst_file)
+
+
+def _sanitize_tokenizer_config(output_path: str) -> None:
+    """Fix known-bad tokenizer_config formats that break Transformers/vLLM.
+
+    Some exports (or partial asset copies) can leave `extra_special_tokens` as a
+    JSON list. Transformers expects a dict-like structure there and will crash
+    during tokenizer init. The standard field for a list is
+    `additional_special_tokens`.
+    """
+    path = Path(output_path) / "tokenizer_config.json"
+    if not path.exists():
+        return
+
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return
+
+    extra = payload.get("extra_special_tokens")
+    if isinstance(extra, list):
+        payload.setdefault("additional_special_tokens", extra)
+        payload.pop("extra_special_tokens", None)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def import_model_from_hf_name(
@@ -148,6 +232,13 @@ def export_model_from_megatron(
         # Save in HuggingFace format
         # strict=False allows saving incomplete shards (skips MTP tensors without mappings)
         bridge.save_hf_pretrained(megatron_model, output_path, strict=False)
+
+        # Megatron bridge exports may omit tokenizer/processor assets for some
+        # multimodal community models, so copy them explicitly from the source HF dir.
+        _copy_hf_auxiliary_assets(hf_tokenizer_path, output_path, overwrite=True)
+        if hf_model_name != hf_tokenizer_path:
+            _copy_hf_auxiliary_assets(hf_model_name, output_path, overwrite=False)
+        _sanitize_tokenizer_config(output_path)
 
     # resetting mcore state
     import megatron.core.rerun_state_machine

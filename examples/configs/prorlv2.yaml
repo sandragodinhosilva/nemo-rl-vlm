@@ -100,7 +100,7 @@ loss_fn:
 # Output directories
 # ============================================================================
 checkpointing:
-  checkpoint_dir: "results/prorl"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/prorl"
 
 logger:
   log_dir: "logs/prorl"

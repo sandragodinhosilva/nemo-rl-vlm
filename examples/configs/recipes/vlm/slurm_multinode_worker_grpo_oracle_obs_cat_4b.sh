@@ -4,14 +4,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=192
-#SBATCH --output=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.out
-#SBATCH --error=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.err
+#SBATCH --output=/mnt/data/sgsilva/logs/grpo_logs/slurm-%j.out
+#SBATCH --error=/mnt/data/sgsilva/logs/grpo_logs/slurm-%j.err
 
 set -euo pipefail
 SCRIPT_PATH="/home/sgsilva/nemo-rl-vlm/examples/configs/recipes/vlm/slurm_multinode_worker_grpo_oracle_obs_cat_4b.sh"
 
 if [[ "${1:-}" != "--worker" ]]; then
-    mkdir -p /home/sgsilva/nemo-rl-vlm/slurm_logs
+    mkdir -p /mnt/data/sgsilva/logs/grpo_logs
     srun --nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash "$SCRIPT_PATH" --worker
     exit $?
 fi
@@ -19,7 +19,8 @@ fi
 # 1. SET UP DISTRIBUTED ENVIRONMENT VARIABLES FOR SLURM
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29400
-export RAY_ADDRESS="${MASTER_ADDR}:6379"
+# Use local IP directly so Ray GCS connection works regardless of hostname resolution
+export RAY_ADDRESS="$(hostname -I | awk '{print $1}'):6379"
 export NODE_RANK=$SLURM_NODEID
 
 GPUS_PER_NODE=8
@@ -45,20 +46,60 @@ export HF_DATASETS_CACHE="/mnt/data/shared/cache"
 export WANDB_MODE=offline
 export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_ENABLE_MONITORING=0
+export TORCHDYNAMO_DISABLE=1
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 unset UV_CACHE_DIR
 
-# Put Ray worker venvs on /mnt/data to avoid /home space issues and
-# keep uv lock contention away from other builds on this node
+# Expose only free GPUs to avoid conflicting with other users' processes on shared nodes.
+# Detect free GPUs (>=200 GiB free) and expose only those.
+FREE_GPUS=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | awk -F', ' '$2 > 200000 {printf "%s,", $1}' | sed 's/,$//')
+if [ -n "$FREE_GPUS" ]; then
+    export CUDA_VISIBLE_DEVICES="$FREE_GPUS"
+    GPUS_PER_NODE=$(echo "$FREE_GPUS" | tr ',' '\n' | wc -l)
+    export GPUS_PER_NODE
+    echo "  CUDA_VISIBLE_DEVICES set to free GPUs: $CUDA_VISIBLE_DEVICES"
+    echo "  GPUS_PER_NODE updated to: $GPUS_PER_NODE"
+else
+    echo "  WARNING: No GPUs with >200 GiB free found, using all GPUs"
+fi
+
+# nemo-rl-vlm-grpo-home-venv is built for B300/CUDA 13 (torch 2.10+cu130, transformer-engine,
+# ray, and vllm 0.16 compiled with TORCH_CUDA_ARCH_LIST="10.0a" for sm_100a kernels).
+# The sibling nemo-rl-vlm-home-venv has vllm built WITHOUT that arch flag => "no kernel image
+# available" on B300, so we must point at the grpo venv here.
+# _env_builder looks for a venv named after the worker class under NEMO_RL_VENV_DIR.
+# We symlink the prebuilt venv as that name so _env_builder finds it pre-built.
+# BOTH the sync (colocated) and async (non-colocated) vLLM worker classes need it — the
+# async path uses VllmAsyncGenerationWorker, and without a symlink _env_builder would rebuild
+# a fresh venv that (a) takes ~30min and (b) lacks grpo-home-venv's _triton_alloc_fix.pth
+# (the Qwen3-Next GDN/solve_tril Triton allocator fix) -> generation would crash on B300.
 export NEMO_RL_VENV_DIR="/mnt/data/sgsilva/tmp/nemo-rl-ray-venvs"
+WORKER_VLLM_VENV="/home/sgsilva/nemo-rl-vlm-grpo-home-venv"
 mkdir -p "$NEMO_RL_VENV_DIR"
+for WORKER_VENV_NAME in \
+    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker" \
+    "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker" ; do
+    WORKER_VENV_TARGET="$NEMO_RL_VENV_DIR/$WORKER_VENV_NAME"
+    # Force-replace: if it's a real dir (from a previous _env_builder run), or a symlink pointing
+    # somewhere else (e.g. the stale CUDA-12-arch home venv), delete and re-create the symlink.
+    if [ -e "$WORKER_VENV_TARGET" ] || [ -L "$WORKER_VENV_TARGET" ]; then
+        if [ "$(readlink -f "$WORKER_VENV_TARGET")" != "$(readlink -f "$WORKER_VLLM_VENV")" ]; then
+            echo "Replacing stale worker venv at $WORKER_VENV_TARGET -> $WORKER_VLLM_VENV"
+            rm -rf "$WORKER_VENV_TARGET"
+        fi
+    fi
+    if [ ! -e "$WORKER_VENV_TARGET" ]; then
+        ln -sf "$WORKER_VLLM_VENV" "$WORKER_VENV_TARGET"
+    fi
+    echo "Worker venv [$(basename "$WORKER_VENV_NAME")]: $(readlink -f "$WORKER_VENV_TARGET")"
+done
 
 export PYTHONPATH="/home/sgsilva/nemo-rl-vlm/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src:${PYTHONPATH:-}"
 RAY_CMD="./.venv/bin/python -m ray.scripts.scripts"
 
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}
 
 export NCCL_P2P_LEVEL=NVL
 export NCCL_P2P_DISABLE=0
@@ -86,7 +127,7 @@ if [ "$NODE_RANK" -eq 0 ]; then
     echo "=== Starting Ray HEAD node ==="
     $RAY_CMD start --head --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
     echo "Ray head started"
-    sleep 20
+    sleep 30
 else
     echo "=== Starting Ray WORKER node ==="
     sleep 15
@@ -103,9 +144,12 @@ if [ "$NODE_RANK" -eq 0 ]; then
     for attempt in $(seq 1 30); do
         CURRENT_GPUS=$(./.venv/bin/python - <<'PY'
 import os, ray
-ray.init(address=os.environ["RAY_ADDRESS"], log_to_driver=False, ignore_reinit_error=True)
-print(int(ray.cluster_resources().get("GPU", 0)))
-ray.shutdown()
+try:
+    ray.init(address=os.environ["RAY_ADDRESS"], log_to_driver=False, ignore_reinit_error=True)
+    print(int(ray.cluster_resources().get("GPU", 0)))
+    ray.shutdown()
+except Exception:
+    print(0)
 PY
 )
         echo "  GPU preflight ${attempt}/30: ${CURRENT_GPUS}/${EXPECTED_GPUS}"
@@ -127,7 +171,7 @@ if [ "$NODE_RANK" -eq 0 ]; then
     CONFIG="${GRPO_CONFIG:-examples/configs/recipes/vlm/vlm_grpo_qwen35_4b_visual_obs_cat.yaml}"
     echo "=== Starting GRPO (visual-obs 4B) — config: $CONFIG ==="
 
-    LOG_DIR="/home/sgsilva/nemo-rl-vlm/slurm_logs/$(date +%Y%m%d)"
+    LOG_DIR="/mnt/data/sgsilva/logs/grpo_logs/$(date +%Y%m%d)"
     mkdir -p "$LOG_DIR"
     LOG_FILE="$LOG_DIR/grpo_visual_obs_cat_4b_node_${NODE_RANK}_$(date +%H%M%S).log"
 

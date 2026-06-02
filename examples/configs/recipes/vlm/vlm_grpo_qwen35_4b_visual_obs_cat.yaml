@@ -55,7 +55,7 @@ checkpointing:
   checkpoint_must_save_by: null
 
 policy:
-  model_name: /mnt/data/shared/models/Qwen3.5-4B  # TODO: replace with exported SFT ckpt from sft_qwen35_4b_oracle_obs_cat_1105
+  model_name: /mnt/data/sgsilva/models/qwen35-4b-oracle-obs-cat-1105-step357
   tokenizer:
     name: ${policy.model_name}
   train_global_batch_size: 16
@@ -107,7 +107,7 @@ policy:
 
   generation:
     backend: vllm
-    max_new_tokens: 2048
+    max_new_tokens: 65536   # follow reference vlm_grpo_qwen35_4b_thrive.yaml (reasoning model)
     temperature: 1.0
     top_p: 1.0
     top_k: null
@@ -122,19 +122,27 @@ policy:
       tensor_parallel_size: 1
       pipeline_parallel_size: 1
       expert_parallel_size: 1
-      gpu_memory_utilization: 0.6
+      gpu_memory_utilization: 0.9
       max_model_len: ${policy.max_total_sequence_length}
       enforce_eager: false
       enable_expert_parallel: false
       skip_tokenizer_init: False
     vllm_kwargs:
+      # FLASH_ATTN per reference config (top-level attention_backend key). On B300/CUDA13 this
+      # also avoids FlashInfer 0.5.3 (TRTLLM Triton "no allocator" + standard-prefill 'o_data_type').
+      # NOTE: the GDN/solve_tril Triton allocator still needs grpo-home-venv's _triton_alloc_fix.pth.
+      attention_backend: "FLASH_ATTN"
       media_io_kwargs:
         video:
           num_frames: 2048
+      mm_processor_kwargs:
+        size:
+          longest_edge: 102000000
+          shortest_edge: 4096
     colocated:
       enabled: true
       resources:
-        gpus_per_node: 4
+        gpus_per_node: 8
         num_nodes: 1
 
   megatron_cfg:
@@ -228,7 +236,7 @@ env:
     num_workers: 8
 
 logger:
-  log_dir: "/home/sgsilva/nemo-rl-vlm/logs_grpo/grpo_visual_obs_cat_1105_4b"
+  log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
   wandb_enabled: false
   tensorboard_enabled: true
   mlflow_enabled: false
@@ -239,7 +247,7 @@ logger:
     project: "nemo-rl-vlm"
     name: "grpo_visual_obs_cat_1105_4b"
   tensorboard:
-    log_dir: "/home/sgsilva/nemo-rl-vlm/logs_grpo/grpo_visual_obs_cat_1105_4b"
+    log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
   mlflow:
     experiment_name: "nemo-rl-vlm"
     run_name: "grpo_visual_obs_cat_1105_4b"

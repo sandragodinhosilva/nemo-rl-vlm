@@ -10,7 +10,7 @@ grpo:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "results/grpo-sliding-puzzle"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo-sliding-puzzle"
   metric_name: "val:accuracy" # one of "val:" or "train:" followed by the metric name
   higher_is_better: true
   keep_top_k: 3

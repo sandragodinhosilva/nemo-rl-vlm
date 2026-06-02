@@ -213,7 +213,7 @@ explicit = true
 
 [tool.uv]
 preview = true # Enable preview features like extra-build-dependencies
-extra-build-variables = { sgl-kernel = { CMAKE_BUILD_PARALLEL_LEVEL = "24", FLASHINFER_CUDA_ARCH_LIST = "9.0a 10.0a", CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" } }
+extra-build-variables = { sgl-kernel = { CMAKE_BUILD_PARALLEL_LEVEL = "24", FLASHINFER_CUDA_ARCH_LIST = "9.0a 10.0a", CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" }, deep_ep = { CFLAGS = "-I/usr/local/cuda/include/cccl", CXXFLAGS = "-I/usr/local/cuda/include/cccl" }, deep_gemm = { CFLAGS = "-I/usr/local/cuda/include/cccl", CXXFLAGS = "-I/usr/local/cuda/include/cccl" } }
 no-build-isolation-package = [
   "transformer-engine-torch",  # Re-enabled - building from git source with PyTorch 2.10.0
   "transformer-engine",  # Re-enabled - building from git source with PyTorch 2.10.0
