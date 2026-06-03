@@ -436,3 +436,70 @@ concurrently on separate GPU pools — `colocated.enabled: false`, `async_engine
 `ratio_clip_max: 0.27`, `max_new_tokens: 65536`. **These match the reference on every knob EXCEPT
 `enforce_eager`**, which must be `true` on B300 (the reference's `false` crashes the async EngineCore —
 torch 2.10+cu130 has no `aot_compile`; §5.4). That single deviation is forced, not a choice.
+
+### 5.9 thinkon (reasoning) GRPO + speedup levers
+
+**Counterpart experiment.** A thinkon GRPO mirrors the thinkoff run but starts from a *reasoning*
+SFT base that emits a real `<think>…</think>` trace before the `[VISUAL OBSERVATIONS]` block.
+
+- **Base model:** `qwen35-4b-oracle-obs-cat-reasoning-1105-step336_thinkon` — the final-epoch export
+  of the thinkon SFT (`sft_vlm_qwen35_4b_oracle_obs_cat_reasoning_local_megatron.yaml`, 3 ep on
+  `reasoning_categorical/train`, loss 0.49). The formatter routes `reasoning_categorical` → the same
+  `visual_obs` ordinal reward as thinkoff (`thrive_vlm_grpo.py`), so reward is identical; only the
+  generation length differs.
+- **max_new_tokens stays HIGH** for thinkon — a real trace is long; capping low truncates it before
+  the answer → 0 reward. Keep `max_total_sequence_length: 32784` (do NOT shrink for "speed" — that
+  truncates reasoning). `max_new_tokens: 16384` (must stay < 32784, sync-worker assert).
+
+**Why thinkon is slower, and the speedup config.** GRPO is generation-bound (~10 min generation /
+step on the thinkoff full run, `Total step time` ~750–840s). thinkon generates longer sequences, so
+at identical settings it is *slower* than thinkoff. To make it faster, a **new** config
+`vlm_grpo_qwen35_4b_visual_obs_cat_reasoning_fast_smoke.yaml` (proven configs left untouched) turns
+on three literature-backed levers — all verified as real keys in `nemo_rl/algorithms/grpo.py`:
+
+| # | Lever | Key(s) | Why (sources below) |
+|---|---|---|---|
+| 1 | Overlong filtering | `grpo.overlong_filtering: true` | NeMo-RL doc's explicit rec for long-reasoning RL — drop seqs that hit `max_len` instead of wasting decode |
+| 2 | Dynamic sampling (DAPO) | `grpo.use_dynamic_sampling: true` + `dynamic_sampling_max_gen_batches: 4` + `batch_multiplier: 2` | skip prompt-groups with zero reward-std (no gradient); ordinal reward saturates many groups |
+| 3 | CUDA graphs | `vllm_cfg.enforce_eager: false` | ~1.5–2× decode. ❌ **REVERTED — does NOT work on B300** (see below) |
+
+`gpu_memory_utilization: 0.85` here (between the 0.9 that OOM'd the thinkoff full run @ step 93 and
+the conservative 0.8).
+
+> **NOT applied (deferred):** smaller batch (`num_prompts_per_step 16→8`, ~2× but noisier gradient) and
+> **speculative decoding** (NVIDIA reports ~1.5× rollout speedup in "RL-Think" settings; needs a draft
+> model — a v2 lever if 1–2 aren't enough). seqlen shrink ruled out (truncates traces).
+
+**Lever 3 verdict (2026-06-03): CUDA graphs are NOT viable on B300.** The fast smoke with
+`enforce_eager: false` crashed at vLLM EngineCore init across all workers:
+`RuntimeError: aot_compile is not supported by the current configuration (torch: 2.10.0+cu130)`.
+This is the **same §5.4 aot_compile bug** that forces `enforce_eager: true` on the async path — it
+applies to the **sync colocated path too**. Reverted lever 3 to `true`; the smoke-first test caught
+it before any full run was wasted. **So on B300, only levers 1+2 are available** until torch/cu13
+gains aot_compile (or vLLM stops requiring it). The fast config keeps `enforce_eager: true`.
+
+**Levers 1+2 (overlong_filtering + dynamic_sampling) — MEASURED, ~2× speedup.** The fast smoke
+(`enforce_eager: true`, levers 1+2 on, thinkon `step336_thinkon` base) ran clean, 0 errors:
+- [x] `enforce_eager:false` on B300 → **FAILS** (`aot_compile is not supported`, torch 2.10+cu130); must stay `true`
+- [x] **`Total step time`: 480s (step 1, one-time setup) → 345s, 346s (steady state)** vs the ~750s
+  thinkoff baseline → **~2.2× faster at steady state** (1.56× including the warm-up step). Win comes
+  from levers 1+2 alone, no CUDA graphs.
+- [x] **dynamic sampling verified active:** every step logs `Detected 512 prompts with non-zero std;
+  256 are required and used for training` — it generates `num_prompts_per_step × batch_multiplier`
+  (256×2=512) and keeps only the 256 non-zero-reward-std groups, discarding saturated ones (the
+  ordinal visual_obs reward saturates many groups, so this skips real wasted gradient-free work).
+  `overlong_filtering: true` confirmed in the resolved run-vars (`use_overlong_filtering`).
+
+**Promoted to the full thinkon GRPO config** `vlm_grpo_qwen35_4b_visual_obs_cat_reasoning_fast.yaml`
+(from the proven thinkoff full + levers 1+2): base `…-step336_thinkon`, `reasoning_categorical/train`,
+**val on `categorical/test`** (NO `reasoning_categorical/test` split exists — thinkon SFT carved val
+from train; the plain categorical test set measures the same ordinal accuracy), crash-safe
+(save/val_period 30, max_num_steps 190, gpu_mem 0.8), distinct `_thinkon_fast` log/checkpoint dirs.
+Launched alongside the thinkoff full run — both visible as separate dashboard entries.
+
+Then promote the surviving levers into a full `…_reasoning_fast.yaml` (distinct `log_dir` /
+`checkpoint_dir`) for the real thinkon GRPO run.
+
+**Sources:** NeMo-RL GRPO guide (overlong_filtering, dynamic sampling/DAPO),
+NVIDIA "Speculative Decoding in NeMo RL" (1.8× RL-Zero / 1.5× RL-Think rollout speedup),
+TRL/Axolotl vLLM-for-GRPO notes (generation is the bottleneck; colocated vLLM).
