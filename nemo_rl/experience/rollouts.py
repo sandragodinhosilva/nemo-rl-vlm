@@ -512,6 +512,17 @@ def run_multi_turn_rollout(
         done = truncation_mask | terminateds
         sample_terminated[active_indices] |= done
 
+        # Write the environment's returned metadata back into extra_env_info for ALL samples
+        # processed this turn (not only the continuing ones below). The env (e.g. the visual-obs
+        # ThriveVLMEnvironment) stashes per-sample reward_details here; for single-turn GRPO every
+        # sample is "done" after turn 1, so without this the reward_details never reach the batch
+        # and never get logged to train_data_step*.jsonl (dashboard per-question view stays empty).
+        if env_output.metadata is not None:
+            for local_idx, global_idx in enumerate(active_indices.tolist()):
+                meta = env_output.metadata[local_idx]
+                if meta is not None:
+                    current_batch["extra_env_info"][global_idx] = meta
+
         # Update active indices for the next iteration
         active_indices_local_next = torch.where(~done)[0]
         active_indices = active_indices[active_indices_local_next]
