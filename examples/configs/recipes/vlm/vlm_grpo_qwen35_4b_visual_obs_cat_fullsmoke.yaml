@@ -238,7 +238,7 @@ env:
     num_workers: 8
 
 logger:
-  log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
+  log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_thinkoff_smoke"
   wandb_enabled: false
   tensorboard_enabled: true
   mlflow_enabled: false
@@ -247,12 +247,12 @@ logger:
   num_val_samples_to_print: 8
   wandb:
     project: "nemo-rl-vlm"
-    name: "grpo_visual_obs_cat_1105_4b"
+    name: "grpo_visual_obs_cat_thinkoff_smoke"
   tensorboard:
-    log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
+    log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_thinkoff_smoke"
   mlflow:
     experiment_name: "nemo-rl-vlm"
-    run_name: "grpo_visual_obs_cat_1105_4b"
+    run_name: "grpo_visual_obs_cat_thinkoff_smoke"
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10

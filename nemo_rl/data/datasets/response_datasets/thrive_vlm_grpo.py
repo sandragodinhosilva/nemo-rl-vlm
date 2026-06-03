@@ -218,7 +218,9 @@ def format_thrive_vlm_grpo_dataset(
     }
     schema = example.get("schema", "")
     dataset_type = example.get("dataset_type", "")
-    if schema == "categorical":
+    # Both the thinkoff ("categorical") and thinkon ("reasoning_categorical") visual-obs schemas
+    # use the same ordinal reward — the reward fn strips <think> before parsing the answer block.
+    if schema in ("categorical", "reasoning_categorical"):
         task_type = "visual_obs"
     elif dataset_type == "comparison":
         task_type = "comparison"

@@ -1,0 +1,79 @@
+defaults:
+  - sft_vlm_qwen35_4b_video_local_common_megatron.yaml
+
+# Thinkon (reasoning) counterpart of sft_vlm_qwen35_4b_oracle_obs_cat_local_megatron.yaml.
+# Trains qwen35-4b on the reasoning_categorical visual-obs data (assistant target = <think> trace
+# + [VISUAL OBSERVATIONS] block). 3722 train rows; targets are short (~250 tok), seqlen 32784 is ample.
+# No reasoning_categorical/test split exists -> carve val from train via split_validation_size.
+
+sft:
+  max_num_epochs: 3
+  max_num_steps: 5
+  val_period: 5
+  val_batches: 8
+  val_global_batch_size: 32
+  val_micro_batch_size: 1
+  val_at_start: true
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/tmp/sft_thinkon_smoke_ckpt"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 3
+  save_period: 500  # 3722 rows / gbs 32 ~= 116 steps/epoch; 1 ckpt/epoch
+
+policy:
+  max_total_sequence_length: 32784
+  train_micro_batch_size: 1
+  megatron_cfg:
+    activation_checkpointing: false
+    sequence_parallel: false
+    scheduler:
+      lr_decay_iters: 336  # ~116 steps/epoch x 3 epochs
+      lr_warmup_iters: 34   # ~10% warmup
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 16
+  seed: 42
+  train:
+    dataset_name: thrive-vlm-sft
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1105_not_reviewed_visual_obs/reasoning_categorical/train
+    split: train
+    split_validation_size: 0.035   # ~128 of 3722 rows held out for val (no reasoning_categorical/test)
+  validation:
+    dataset_name: thrive-vlm-sft
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1105_not_reviewed_visual_obs/reasoning_categorical/train
+    split: train
+    split_validation_size: 0.035
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_oracle_obs_cat_reasoning_1105"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_oracle_obs_cat_reasoning_1105"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_oracle_obs_cat_reasoning_1105"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_oracle_obs_cat_reasoning_1105"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_oracle_obs_cat_reasoning_1105"

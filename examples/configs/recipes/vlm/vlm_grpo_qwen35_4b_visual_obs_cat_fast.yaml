@@ -47,7 +47,7 @@ loss_fn:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo_visual_obs_cat_1105_4b"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo_visual_obs_cat_fast"
   metric_name: "val:accuracy"
   higher_is_better: true
   keep_top_k: 3
@@ -62,7 +62,7 @@ policy:
   train_micro_batch_size: 1
   generation_batch_size: 16
   logprob_batch_size: 4
-  max_total_sequence_length: 32784
+  max_total_sequence_length: 24576
   precision: "bfloat16"
   offload_optimizer_for_logprob: false
 
@@ -238,7 +238,7 @@ env:
     num_workers: 8
 
 logger:
-  log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
+  log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_fast"
   wandb_enabled: false
   tensorboard_enabled: true
   mlflow_enabled: false
@@ -247,12 +247,12 @@ logger:
   num_val_samples_to_print: 4
   wandb:
     project: "nemo-rl-vlm"
-    name: "grpo_visual_obs_cat_1105_4b"
+    name: "grpo_visual_obs_cat_fast"
   tensorboard:
-    log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_1105_4b"
+    log_dir: "/mnt/data/sgsilva/logs/grpo_logs/grpo_visual_obs_cat_fast"
   mlflow:
     experiment_name: "nemo-rl-vlm"
-    run_name: "grpo_visual_obs_cat_1105_4b"
+    run_name: "grpo_visual_obs_cat_fast"
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10
