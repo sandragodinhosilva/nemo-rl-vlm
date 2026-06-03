@@ -155,14 +155,24 @@ class ThriveVLMVerifyWorker:
         responses: list[str],
         ground_truths: list[str],
         task_types: Optional[list[str]] = None,
+        exercise_ids: Optional[list[str]] = None,
     ) -> list[dict]:
         """Extract parsed scores and component rewards for debug printing."""
         if task_types is None:
             task_types = ["repetition"] * len(responses)
+        if exercise_ids is None:
+            exercise_ids = [""] * len(responses)
 
         results = []
-        for response, gt, task_type in zip(responses, ground_truths, task_types):
-            if task_type in AUX_TASK_TYPES:
+        for response, gt, task_type, exercise_id in zip(
+            responses, ground_truths, task_types, exercise_ids
+        ):
+            if task_type == "visual_obs":
+                _, info = compute_visual_obs_reward(
+                    response, gt, {"exercise_id": exercise_id}
+                )
+                info["task_type"] = task_type
+            elif task_type in AUX_TASK_TYPES:
                 _, info = compute_aux_reward(task_type, response, gt, self.aux_config)
                 info["task_type"] = task_type
             elif task_type == "comparison":
@@ -596,7 +606,8 @@ class ThriveVLMEnvironment(EnvironmentInterface):
         if should_print:
             debug_results = ray.get(
                 self.verify_workers[0].extract_debug_info.remote(
-                    assistant_response_batch[:2], ground_truths[:2], task_types[:2]
+                    assistant_response_batch[:2], ground_truths[:2], task_types[:2],
+                    exercise_ids[:2],
                 )
             )
             for i, info in enumerate(debug_results):

@@ -69,19 +69,23 @@ fi
 # ray, and vllm 0.16 compiled with TORCH_CUDA_ARCH_LIST="10.0a" for sm_100a kernels).
 # The sibling nemo-rl-vlm-home-venv has vllm built WITHOUT that arch flag => "no kernel image
 # available" on B300, so we must point at the grpo venv here.
-# _env_builder looks for a venv named after the worker class under NEMO_RL_VENV_DIR.
-# We symlink the prebuilt venv as that name so _env_builder finds it pre-built.
-# BOTH the sync (colocated) and async (non-colocated) vLLM worker classes need it — the
-# async path uses VllmAsyncGenerationWorker, and without a symlink _env_builder would rebuild
-# a fresh venv that (a) takes ~30min and (b) lacks grpo-home-venv's _triton_alloc_fix.pth
-# (the Qwen3-Next GDN/solve_tril Triton allocator fix) -> generation would crash on B300.
-export NEMO_RL_VENV_DIR="/mnt/data/sgsilva/tmp/nemo-rl-ray-venvs"
+# _env_builder builds a venv named after each Ray worker class under NEMO_RL_VENV_DIR, which
+# DEFAULTS to $GIT_ROOT/venvs/ (see nemo_rl/distributed/worker_groups.py:485). The working SFT
+# launchers do NOT override NEMO_RL_VENV_DIR — we match that. Overriding it to /mnt/data broke
+# Ray's worker bootstrap: the ReplayBuffer/Megatron actors crashed at start with
+# "ModuleNotFoundError: No module named 'ray'" (raylet spawns .venv/default_worker.py but the
+# worker venv under the custom dir wasn't on the resolved path). Using the default venvs/ dir
+# fixes it (same as the SFT). We still pre-seed ONLY the vLLM worker classes there as symlinks to
+# grpo-home-venv (they need the sm_100 vllm + _triton_alloc_fix.pth); Megatron/ReplayBuffer get
+# normal _env_builder real venvs in venvs/ (one-time, cached) — and those bootstrap ray correctly.
+unset NEMO_RL_VENV_DIR
+NEMO_RL_VENV_DIR_RESOLVED="/home/sgsilva/nemo-rl-vlm/venvs"
 WORKER_VLLM_VENV="/home/sgsilva/nemo-rl-vlm-grpo-home-venv"
-mkdir -p "$NEMO_RL_VENV_DIR"
+mkdir -p "$NEMO_RL_VENV_DIR_RESOLVED"
 for WORKER_VENV_NAME in \
     "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker" \
     "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker" ; do
-    WORKER_VENV_TARGET="$NEMO_RL_VENV_DIR/$WORKER_VENV_NAME"
+    WORKER_VENV_TARGET="$NEMO_RL_VENV_DIR_RESOLVED/$WORKER_VENV_NAME"
     # Force-replace: if it's a real dir (from a previous _env_builder run), or a symlink pointing
     # somewhere else (e.g. the stale CUDA-12-arch home venv), delete and re-create the symlink.
     if [ -e "$WORKER_VENV_TARGET" ] || [ -L "$WORKER_VENV_TARGET" ]; then

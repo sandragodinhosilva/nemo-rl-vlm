@@ -251,23 +251,32 @@ strings /home/sgsilva/nemo-rl-vlm-grpo-home-venv/lib/python3.12/site-packages/vl
 # Should show sm_100a
 ```
 
-### 5.3 Worker venv symlink (BOTH sync and async classes)
+### 5.3 Worker venv setup — symlink ONLY the vLLM classes, in the DEFAULT venv dir
 
-`_env_builder` looks for a venv named after the Ray worker **class**. The colocated (sync) path
-uses `VllmGenerationWorker`; the async (non-colocated) path uses `VllmAsyncGenerationWorker`.
-The launcher symlinks **both** names to `grpo-home-venv` on every run:
-```
-/mnt/data/sgsilva/tmp/nemo-rl-ray-venvs/
-  nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker            → grpo-home-venv
-  nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker → grpo-home-venv
-```
-**Why both:** if the async class is *not* symlinked, `_env_builder` builds a fresh venv for it —
-which (a) takes ~30 min and (b) lacks `_triton_alloc_fix.pth`, so generation crashes on B300 with
-the GDN/`solve_tril` allocator error (§5.4.1). Symlinking both to `grpo-home-venv` (which has the
-sm_100 vllm + the `.pth`) makes either run mode start instantly with the fix in place.
-`grpo-home-venv` imports `AsyncLLMEngine`/`AsyncLLM` cleanly, so it serves the async worker too.
+Two hard-won rules, both critical:
 
-If a stale real dir or wrong-target symlink exists, the launcher deletes and re-creates it.
+**(a) Use the DEFAULT `NEMO_RL_VENV_DIR` (`$GIT_ROOT/venvs/`). Do NOT override it to `/mnt/data`.**
+NeMo-RL's `create_local_venv_on_each_node` (`worker_groups.py:485`) builds per-node-local worker
+venvs there. Overriding `NEMO_RL_VENV_DIR=/mnt/data/...` (NFS) **breaks Ray's worker bootstrap**:
+non-vLLM actors (`ReplayBuffer`, `MegatronPolicyWorker`) crash at start with
+`ModuleNotFoundError: No module named 'ray'` (raylet runs `.venv/default_worker.py` but the
+worker venv under the custom NFS dir isn't on the resolved path), and the async loop then spins
+forever on `buffer_filled_ratio=0/4`. The working SFT launchers never set `NEMO_RL_VENV_DIR`.
+**Fix: `unset NEMO_RL_VENV_DIR`; use `/home/sgsilva/nemo-rl-vlm/venvs/`.**
+
+**(b) Symlink ONLY the vLLM worker classes to `grpo-home-venv` — let the others build normally.**
+```
+/home/sgsilva/nemo-rl-vlm/venvs/
+  nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker            → grpo-home-venv  (symlink)
+  nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker → grpo-home-venv  (symlink)
+  nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker  (real _env_builder venv)
+  nemo_rl.algorithms.async_utils.ReplayBuffer                                (real _env_builder venv, async only)
+```
+Only the vLLM workers need the sm_100 vllm + `_triton_alloc_fix.pth`, so only they get the symlink.
+**Do NOT symlink `MegatronPolicyWorker`/`ReplayBuffer` to grpo-home-venv** — even though it has ray,
+the symlink confuses Ray's worker bootstrap (same `No module named 'ray'`). They need their own real
+`_env_builder` venvs (one-time, cached) which bootstrap ray correctly. The launcher symlinks both vLLM
+classes on every run (deleting any stale real dir / wrong-target symlink) and leaves the rest alone.
 
 ### 5.4 Known issues and workarounds
 
@@ -281,11 +290,17 @@ If a stale real dir or wrong-target symlink exists, the launcher deletes and re-
 | `networkx.lazy_imports` missing | Corrupted networkx in worker venv | Reinstall networkx inside the affected venv |
 | `RuntimeError: Kernel requires a runtime memory allocation, but no allocator was set` (in `fla/ops/solve_tril.py` → `chunk_gated_delta_rule`) | **The real generation blocker.** Qwen3.5-4B is a Qwen3-Next **hybrid / Gated-DeltaNet linear-attention** model; its bundled FLA Triton kernel needs a Triton 3.6 scratch allocator that this vllm 0.16-dev build never registers. Fires on **every** generation (even plain text), independent of attention backend. | Register a torch-backed Triton allocator at interpreter startup. Installed in `grpo-home-venv` as `site-packages/_triton_alloc_fix.py` + `_triton_alloc_fix.pth` (auto-imported by `site`, so every Ray-spawned vLLM worker gets it). See §5.4.1. |
 | `BatchPrefillWithPagedKVCacheWrapper.plan() got an unexpected keyword argument 'o_data_type'` | FlashInfer 0.5.3 is incompatible with vllm 0.16-dev's FlashInfer call signature | Force the FlashAttention backend: `vllm_kwargs.attention_backend: "FLASH_ATTN"` in the GRPO configs |
-| `RuntimeError: aot_compile is not supported by the current configuration … torch: 2.10.0+cu130` (async EngineCore fails to start) | The **async** EngineCore tries to AOT-compile CUDA graphs when `enforce_eager: false`; torch 2.10+cu130 has no `aot_compile`. Colocated avoids it because it runs `enforce_eager: true`. | Set `vllm_cfg.enforce_eager: true` in the async configs too (loses the CUDA-graph speedup; async_grpo/async_engine still work in eager mode) |
+| `RuntimeError: aot_compile is not supported by the current configuration … torch: 2.10.0+cu130` (async EngineCore fails to start) | **CONFIRMED hard limitation.** The async EngineCore AOT-compiles CUDA graphs when `enforce_eager: false` (the reference value); `vllm/compilation/wrapper.py:201` requires a torch with `aot_compile`, which **torch 2.10+cu130 does not have**. So the reference's `enforce_eager: false` **cannot run on B300** — verified by direct repro (all EngineCores crash at init). | Set `vllm_cfg.enforce_eager: true` (the **only forced deviation** from the reference). Loses CUDA-graph capture; async_grpo/async_engine still work in eager mode. |
+| `AssertionError: response_length=N > max_model_len=M` (sync `vllm_worker.py:719`) | `max_new_tokens` (e.g. 65536) exceeds `max_model_len` (= `max_total_sequence_length`, 32784) → a generation can overshoot the window by ≥1 token. The **sync/colocated** worker asserts on this; the **async** worker does not. | On **colocated** configs keep `max_new_tokens` below `max_total_sequence_length` (e.g. ≤ ~30000, leaving room for the prompt). The async (reference-style) configs keep 65536 since the async path tolerates it. |
 | `Using TRTLLM prefill attention (auto-detected)` then Triton allocator crash | vllm auto-selects FlashInfer TRTLLM prefill when `kv_cache_dtype: auto`; TRTLLM kernel also hits the unallocated-Triton path | Same `attention_config` fix above (FLASH_ATTN bypasses all FlashInfer paths) |
+| **Run exits cleanly (code 0) after "SETUP COMPLETE"/"Using GRPO advantage estimator" but runs 0 steps** (no `Epoch`/`Step` banner) | **Not a bug — a stale checkpoint resume.** A prior run saved a `step_N` ckpt to the same `checkpointing.checkpoint_dir`; the next run resumes `total_steps=N`, so `while total_steps < max_num_steps` is immediately false (e.g. resumed `step_5` with `max_num_steps: 5`). Look for `loading distributed checkpoint from …/step_N` in the log. | Delete the stale checkpoint dir (or bump `max_num_steps` / point `checkpoint_dir` somewhere fresh) before re-running a smoketest: `rm -rf <checkpoint_dir>/step_*` |
+| Async config runs 0 steps and exits 0 | The async path needs `run_vlm_grpo.py` to dispatch to `async_grpo_train` (the old VLM entry point only called the sync `grpo_train`). | Resolved by the origin/main merge — current `run_vlm_grpo.py` branches on `async_grpo.enabled` and calls `async_grpo_train`. (Also requires `enforce_eager: true`, above.) |
 | `Free memory < desired utilization` on `cuda:0` | Shared node: other users' processes occupy some GPUs; with `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` + TP=1 all vllm workers pile onto `cuda:0` | Auto-detect free GPUs (>200 GiB) → `CUDA_VISIBLE_DEVICES` + `GPUS_PER_NODE` (§5.5) |
 | `raylet started with N GPUs but CUDA_VISIBLE_DEVICES has M` | Ray `--num-gpus` must match the `CUDA_VISIBLE_DEVICES` count | `GPUS_PER_NODE` recomputed from the detected free-GPU list |
 | `cluster.gpus_per_node` / `colocated.resources.gpus_per_node` mismatch | YAML GPU count must match the launcher's detected free-GPU count | On a fully-free 8-GPU node both are set to **8** (colocated); the launcher's auto-detect must yield 8 (no other-user procs) |
+| `ModuleNotFoundError: No module named 'ray'` from raylet (ReplayBuffer/Megatron worker crashes at start) → async loop spins `buffer_filled_ratio=0/4` forever | **`NEMO_RL_VENV_DIR` was overridden to `/mnt/data` (NFS).** `create_local_venv_on_each_node` (`worker_groups.py:485`) expects the **default node-local `$GIT_ROOT/venvs/`**; building worker venvs on the NFS path breaks Ray's per-node worker bootstrap. The working SFT launchers never override it. | **`unset NEMO_RL_VENV_DIR`; use default `venvs/`** (§5.3). Symlink only the vLLM classes there; let Megatron/ReplayBuffer build normal real venvs. |
+| `RuntimeError: pidfd_getfd: Operation not permitted` in `update_weights_via_ipc_zmq` → `ZMQ communication timeout after 120000ms` (colocated weight refit dies) | **`PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True` breaks colocated CUDA-IPC weight transfer.** Expandable-segments tensors use a VM-based allocator that can't be exported via CUDA IPC handles, so the Megatron→vLLM weight stream fails. (`pidfd_getfd` itself is *not* blocked on any node — verified.) The worker-27 PASS used `False`; setting `True` as an OOM fix caused this. | Keep `megatron_cfg.env_vars.PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"` for **colocated** runs. It is **mutually exclusive** with colocated IPC weight transfer. |
+| `torch.OutOfMemoryError` in Megatron `backward_step` (colocated, after generation; vLLM sleep-mode still holds ~8.5 GiB/GPU, ~15 GiB reserved-but-unallocated) | Long sequences (`max_total_sequence_length: 32784`) → large backward activations; colocated leaves little headroom. | Set **`megatron_cfg.activation_checkpointing: true`** (recompute activations in backward — big memory saving, allocator-agnostic so it's IPC-safe). Do **NOT** use `expandable_segments:True` for this in colocated mode (breaks IPC, above). |
 
 > **Build robustness:** run the `uv sync` build under `setsid nohup … < /dev/null &` and log to
 > `/mnt/data/sgsilva/tmp/`. The cluster has had transient memory pressure that silently
@@ -367,11 +382,32 @@ These differ from the original design in `examples/configs/recipes/vlm/vlm_grpo_
 - [x] **Generation works on B300** — root-caused the `solve_tril` Triton allocator crash (Qwen3-Next GDN linear attention) and fixed via `_triton_alloc_fix.pth` (§5.4.1) + `attention_backend: FLASH_ATTN` (avoids FlashInfer 0.5.3 `o_data_type`). Standalone-verified, single-proc and V1-multiprocessing.
 - [x] **Colocated GRPO smoketest PASSED end-to-end** — `Training exit code: 0`; 5 steps, generation→reward→policy-update→validation→checkpoint, `Avg Reward 0.0960`, zero errors (worker-27, 8-GPU colocated). The proven path.
 - [x] Launcher symlinks **both** sync + async worker venv classes to `grpo-home-venv` (§5.3).
+- [x] **Merged origin/main** (resolved 5 conflicts; visual-obs wiring re-verified post-merge: formatter still emits `task_type=visual_obs` + `exercise_id`). Pushed to the `sandragodinhosilva` fork only (never SWORD `origin`). The merge also brought in `run_vlm_grpo.py`'s `async_grpo_train` dispatch.
+- [x] **Renamed `thrive_vlm_*` env modules → `visual_obs_*`** to avoid colliding with origin/main's env refactor (it deleted `thrive_vlm_environment.py` → generic `vlm_environment.py`). Class names + the `visual-obs` env key unchanged.
+- [x] Fixed `extract_debug_info` — added the `visual_obs` branch (+ `exercise_ids` param); debug print now shows `[visual_obs]` with real per-question scores instead of `[repetition]`.
+- [x] Identified the **stale-checkpoint-resume 0-steps trap** (§5.4) — a prior `step_N` ckpt in the `checkpoint_dir` makes a re-run resume at `total_steps=N` and exit 0 without training. Clear `checkpoint_dir/step_*` between runs.
+- [x] **Worker venv-dir root cause fixed (§5.3)** — the custom `NEMO_RL_VENV_DIR=/mnt/data` (NFS) broke Ray's worker bootstrap (`ModuleNotFoundError: ray` for ReplayBuffer/Megatron). Reverted to default `venvs/`; symlink only the vLLM classes.
+- [x] **Reward pipeline CONFIRMED end-to-end** — a real visual-obs rollout scored `Final Reward: 0.9286` with the correct `[visual_obs]` label (not `[repetition]`) — validates `compute_visual_obs_reward` routing, the `extract_debug_info` fix, AND the merged formatter's `exercise_id` threading, all on B300.
 
-**Pending:**
-- [ ] Async (experimental) smoketest validation — in progress; GPU preflight passes, no venv rebuild. Verifies `async_grpo` + `async_engine` + non-colocated on B300.
-- [ ] Full GRPO run on the SFT checkpoint — colocated config is ready now; async after its smoketest validates.
-- [ ] (cosmetic) `extract_debug_info` has no `visual_obs` branch → debug print mislabels visual-obs samples as `[repetition]` with `effectiveness=None`. The **actual** reward path (`verify()`→`_compute_reward_with_details`) routes correctly (reward 0.096 ≠ 0). Print-only bug.
+**Run mode — colocated is the validated path (USE THIS).** Final working colocated config:
+`enforce_eager: true`, `max_new_tokens: 16384` (< 32784 ceiling), `attention_backend: FLASH_ATTN`,
+`PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False` (IPC-compatible),
+`megatron_cfg.activation_checkpointing: true` (OOM fix), default `venvs/` dir, `_triton_alloc_fix.pth`.
+- [x] **Colocated GRPO trains AND learns end-to-end on B300.** Full-config smoketest on the SFT
+  checkpoint: initial validation `Avg Reward 0.7433` (per-question `[visual_obs]` ordinal reward, range
+  0.54–0.93), then after 1 GRPO step **`Avg Reward 0.8659`** — i.e. the policy improved. Passed both
+  failure gates: IPC weight refit (no pidfd/timeout) and Megatron backward (no OOM).
+- [x] **Reward verified per-question** — unit-tested on real exercise schema (exercise 10001, 7 Qs):
+  each question scored by ordinal distance within its own option set (1-step→0.75, farthest→0.0,
+  exact→1.0), aggregate = exact mean. `reward_details` (with `per_question`) is logged to
+  `train_data_step*.jsonl` for the `tools/grpo_dashboard.py` dashboard.
+- [x] **Full 238-step run** on the SFT checkpoint launched (`num_prompts_per_step: 16` ×
+  `num_generations_per_prompt: 8` = 128 rollouts/step for ~2× speed; `val_at_start` + `val_at_end`
+  for a before/after GRPO delta).
+- [~] **Async** (reference-style, non-colocated): infra all works (venv bootstrap fixed, EngineCores
+  start with `enforce_eager: true`, ReplayBuffer + AsyncTrajectoryCollector run, scored a real
+  `0.9286`), but generation at `max_new_tokens: 65536` is too slow to fill the buffer practically.
+  **Deferred — use colocated.**
 
 **Target node:** launch into an idle 8-GPU allocation via `srun --jobid=<JOBID> --overlap` (the
 `--overlap` flag is required to attach to an allocation already holding a `bash` placeholder task).
@@ -379,21 +415,24 @@ Never hardcode the node — resolve with `$(hostname)`/`scontrol`/`squeue` and c
 
 ### 5.8 Config variants: proven (colocated) vs experimental (async)
 
-Four GRPO configs exist; **all** share the reference generation settings (`max_new_tokens: 65536`,
-`attention_backend: "FLASH_ATTN"`, `mm_processor_kwargs`, `gpu_memory_utilization: 0.9`):
+Four GRPO configs exist, all sharing `attention_backend: "FLASH_ATTN"`, `mm_processor_kwargs`,
+`gpu_memory_utilization: 0.9`:
 
-| Config | Mode | Status |
-|---|---|---|
-| `vlm_grpo_qwen35_4b_visual_obs_cat_smoketest.yaml` | colocated, sync, 8 GPU | ✅ proven (exit 0) |
-| `vlm_grpo_qwen35_4b_visual_obs_cat.yaml` | colocated, sync, 8 GPU (SFT ckpt) | ✅ proven layout — ready for full run |
-| `vlm_grpo_qwen35_4b_visual_obs_cat_async_smoketest.yaml` | **async**, non-colocated (4 gen / 4 train) | ⏳ experimental — validating |
-| `vlm_grpo_qwen35_4b_visual_obs_cat_async.yaml` | **async**, non-colocated (SFT ckpt) | ⏳ experimental |
+| Config | Mode | max_new_tokens | Status |
+|---|---|---|---|
+| `vlm_grpo_qwen35_4b_visual_obs_cat_smoketest.yaml` | colocated, sync, 8 GPU | ≤32784 (sync assert) | ✅ proven (exit 0) |
+| `vlm_grpo_qwen35_4b_visual_obs_cat.yaml` | colocated, sync, 8 GPU (SFT ckpt) | ≤32784 | ✅ proven layout |
+| `vlm_grpo_qwen35_4b_visual_obs_cat_async_smoketest.yaml` | **async**, non-colocated (4 gen / 4 train) | 65536 (= ref) | ⏳ validating |
+| `vlm_grpo_qwen35_4b_visual_obs_cat_async.yaml` | **async**, non-colocated (SFT ckpt) | 65536 (= ref) | ⏳ experimental |
 
 **Colocated (proven):** vLLM + Megatron trainer time-share all 8 GPUs (`colocated.enabled: true`,
-`async_engine: false`, `async_grpo.enabled: false`). Simplest; validated end-to-end.
+`async_engine: false`, `async_grpo.enabled: false`). Simplest; validated end-to-end. NB: the sync
+worker asserts `response_length ≤ max_model_len`, so `max_new_tokens` must stay < `max_total_sequence_length`
+(32784) — do **not** copy the reference's 65536 onto a colocated config (§5.4).
 
-**Async (experimental, mirrors reference `vlm_grpo_qwen35_4b_thrive.yaml`):** generation and
-training run concurrently on separate GPU pools — `colocated.enabled: false`, `async_engine: true`,
-`async_grpo.enabled: true` (+ `in_flight_weight_updates`), and `loss_fn.use_importance_sampling_correction: true`
-with `ratio_clip_max: 0.27` (rollouts are slightly off-policy). Higher GPU utilization; needed its
-own smoketest on B300 before trusting a full run, and the async worker-class venv symlink fix (§5.3).
+**Async (mirrors reference `vlm_grpo_qwen35_4b_thrive.yaml`):** generation and training run
+concurrently on separate GPU pools — `colocated.enabled: false`, `async_engine: true`,
+`async_grpo.enabled: true` (+ `in_flight_weight_updates`), `loss_fn.use_importance_sampling_correction: true`,
+`ratio_clip_max: 0.27`, `max_new_tokens: 65536`. **These match the reference on every knob EXCEPT
+`enforce_eager`**, which must be `true` on B300 (the reference's `false` crashes the async EngineCore —
+torch 2.10+cu130 has no `aot_compile`; §5.4). That single deviation is forced, not a choice.

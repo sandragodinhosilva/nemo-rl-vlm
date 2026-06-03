@@ -126,8 +126,10 @@ policy:
       expert_parallel_size: 1
       gpu_memory_utilization: 0.9
       max_model_len: ${policy.max_total_sequence_length}
-      enforce_eager: true                # torch 2.10+cu130 lacks aot_compile; async EngineCore
-                                         # crashes with enforce_eager=false (CUDA-graph AOT path).
+      enforce_eager: true                # reference uses false, but that CRASHES the async
+                                         # EngineCore on B300 (CONFIRMED: torch 2.10+cu130 lacks
+                                         # aot_compile, vllm/compilation/wrapper.py:201). This is
+                                         # the only forced deviation from the reference config.
       enable_expert_parallel: false
       skip_tokenizer_init: False
     vllm_kwargs:

@@ -1,15 +1,13 @@
 defaults: sft.yaml
 
-# Oracle-obs SFT — CATEGORICAL v2, 1805 dataset, 3 epochs.
-# TARGET = [VISUAL OBSERVATIONS] block from oracle_397b_1805_categorical_v2.json
-# (Qwen-3.5-397B oracle, v2 question schema, 116 exercises differ from non-v2).
-# Dataset: /mnt/data/shared/vlm/data/human_annotation_datasets/1805_not_reviewed_visual_obs/1805_oracle_obs_sft_train_categorical
-# Built by data_preparation/build_sft_from_oracle_obs.py with
-#   --visual-obs-questions visual_observations_categorical_v2.json
-# 5,778 train reps → 5,489 after 95/5 val split → 171 steps/epoch → 513 total (3ep)
+# Oracle-obs SFT — MERGED dataset (categorical_v2 + angle_v2 + categorical_v2_1q + angle_v2_1q), 1805 dataset, 1 epoch.
+# TARGET = [VISUAL OBSERVATIONS] block from oracle_397b_1805 oracles.
+# Dataset: /mnt/data/shared/vlm/data/human_annotation_datasets/1805_not_reviewed_visual_obs/1805_oracle_obs_sft_train_merged
+# 86,172 rows → 81,863 after 95/5 val split → 2,559 steps/epoch → 2,559 total (1ep)
+# 1 epoch: many samples are same rep / different question subsets — repeated epochs risk overfitting.
 
 sft:
-  max_num_epochs: 3
+  max_num_epochs: 1
   max_num_steps: 1000000
   val_period: 100000
   val_batches: 8
@@ -20,23 +18,23 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_27b_oracle_obs_cat_1805"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_27b_oracle_obs_merged_1805"
   metric_name: "val:val_loss"
   higher_is_better: false
   keep_top_k: 3
-  save_period: 171
+  save_period: 2558
   checkpoint_must_save_by: null
 
 policy:
   model_name: /mnt/data/shared/models/Qwen3.5-27B/
   tokenizer:
     name: ${policy.model_name}
-    chat_template: null  # use the model's bundled chat_template.jinja (handles video/image tokens)
+    chat_template: null
     chat_template_kwargs:
       enable_thinking: true
   train_global_batch_size: 32
   train_micro_batch_size: 1
-  max_total_sequence_length: 65536  # bumped from 32768; 8 rows exceeded 32k and truncation stripped vision_pad tokens
+  max_total_sequence_length: 65536
   precision: "bfloat16"
 
   offload_optimizer_for_logprob: false
@@ -81,7 +79,7 @@ policy:
     moe_per_layer_logging: false
     apply_rope_fusion: false
     bias_activation_fusion: true
-    attention_backend: "flash"
+    attention_backend: "unfused"  # flash fails on short _1q sequences (TE min seqlen constraint)
     defer_fp32_logits: false
 
     optimizer:
@@ -99,16 +97,16 @@ policy:
       use_distributed_optimizer: true
       use_precision_aware_optimizer: true
       clip_grad: ${policy.max_grad_norm}
-      optimizer_cpu_offload: true  # Enable to reduce GPU memory usage
-      optimizer_offload_fraction: 1.0  # Offload all optimizer states to CPU
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
 
     scheduler:
       start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       weight_decay_incr_style: "constant"
       lr_decay_style: "cosine"
-      lr_decay_iters: 513  # 3 epochs; 5,778 rows → 5,489 after 95/5 val split, 171 steps/epoch at global batch 32
-      lr_warmup_iters: 52  # ~10% of decay
+      lr_decay_iters: 2558  # 1 epoch; 86,172 rows → 81,863 after 95/5 val split, 2559 steps/epoch at global batch 32
+      lr_warmup_iters: 256  # ~10% of decay
       lr_warmup_init: 0
 
     distributed_data_parallel_config:
@@ -120,7 +118,7 @@ policy:
       data_parallel_sharding_strategy: "optim_grads_params"
 
     env_vars:
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # variant B OOM fix (Lessons learned §9)
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
 data:
   _override_: true
@@ -133,7 +131,7 @@ data:
   seed: 42
   train:
     - dataset_name: thrive-vlm-sft
-      data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1805_not_reviewed_visual_obs/1805_oracle_obs_sft_train_categorical  # oracle_397b_1805_categorical_v2.json, v2 question schema, 5778 reps
+      data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1805_not_reviewed_visual_obs/1805_oracle_obs_sft_train_merged
       split: train
   validation: null
   default:
@@ -144,7 +142,7 @@ data:
     roles_to_train_on: ["assistant"]
 
 logger:
-  log_dir: "logs/sft_qwen35_27b_oracle_obs_cat_1805"
+  log_dir: "logs/sft_qwen35_27b_oracle_obs_merged_1805"
   wandb_enabled: false
   tensorboard_enabled: true
   mlflow_enabled: false
@@ -152,15 +150,15 @@ logger:
   monitor_gpus: true
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_27b_oracle_obs_cat_1805"
+    name: "sft_qwen35_27b_oracle_obs_merged_1805"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_27b_oracle_obs_cat_1805"
+    name: "sft_qwen35_27b_oracle_obs_merged_1805"
   tensorboard:
-    log_dir: "logs/sft_qwen35_27b_oracle_obs_cat_1805"
+    log_dir: "logs/sft_qwen35_27b_oracle_obs_merged_1805"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_27b_oracle_obs_cat_1805"
+    run_name: "sft_qwen35_27b_oracle_obs_merged_1805"
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10

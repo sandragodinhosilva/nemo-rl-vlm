@@ -1,17 +1,17 @@
 grpo:
   num_prompts_per_step: 16
-  num_generations_per_prompt: 8
+  num_generations_per_prompt: 16
   max_rollout_turns: 1
   max_num_epochs: 1
-  max_num_steps: 1000000
+  max_num_steps: 5
   normalize_rewards: true
   use_leave_one_out_baseline: true
-  val_period: 500
+  val_period: 5
   val_at_start: true
-  val_at_end: true
+  val_at_end: false
   overlong_filtering: false
-  max_val_samples: 256
-  val_batch_size: 256
+  max_val_samples: 16
+  val_batch_size: 16
   seed: 42
   use_dynamic_sampling: false
   batch_multiplier: 1
@@ -47,7 +47,7 @@ loss_fn:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/grpo_visual_obs_cat_1105_4b"
+  checkpoint_dir: "/mnt/data/sgsilva/tmp/grpo_fullsmoke_ckpt"
   metric_name: "val:accuracy"
   higher_is_better: true
   keep_top_k: 3
@@ -107,7 +107,7 @@ policy:
 
   generation:
     backend: vllm
-    max_new_tokens: 16384   # safe: max video prompt (~4k) + 16384 << max_model_len 32784 (sync-worker assert)
+    max_new_tokens: 16384   # safe: max video prompt (~4k) + 16384 << max_model_len 32784
                             # vllm worker asserts response_length <= max_model_len. ~30k leaves
                             # room for the ~2k video prompt + full reasoning trace.
     temperature: 1.0
@@ -244,7 +244,7 @@ logger:
   mlflow_enabled: false
   swanlab_enabled: false
   monitor_gpus: true
-  num_val_samples_to_print: 4
+  num_val_samples_to_print: 8
   wandb:
     project: "nemo-rl-vlm"
     name: "grpo_visual_obs_cat_1105_4b"
