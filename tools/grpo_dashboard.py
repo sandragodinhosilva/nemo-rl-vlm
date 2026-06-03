@@ -19,7 +19,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_LOGS_DIR = "/home/sgsilva/nemo-rl-vlm/logs_grpo"
+DEFAULT_LOGS_DIR = "/mnt/data/sgsilva/logs/grpo_logs"
 
 # Known task types and their plottable numeric score fields (short names).
 # Unknown task types are discovered dynamically from reward_details keys.
