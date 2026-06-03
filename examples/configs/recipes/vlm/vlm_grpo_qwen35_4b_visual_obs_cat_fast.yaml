@@ -3,7 +3,8 @@ grpo:
   num_generations_per_prompt: 8
   max_rollout_turns: 1
   max_num_epochs: 1
-  max_num_steps: 1000000
+  max_num_steps: 190   # ~0.8 epoch (238 steps/epoch): GRPO scaling-law "negligible gains beyond ~80% epoch" (arXiv 2507.18014). Conservative: keeps ~all gains, trims wasted tail. keep_top_k by val:accuracy keeps best.
+  # was 1000000 (=1 full epoch=238); plateau onset ~step 70 but stopping at 190 is the safe upper bound
   normalize_rewards: true
   use_leave_one_out_baseline: true
   val_period: 30
