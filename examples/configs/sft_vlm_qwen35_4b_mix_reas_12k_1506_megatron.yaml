@@ -2,9 +2,9 @@ defaults: sft.yaml
 
 # mix_reas_12k_1506 (REBUILT 2026-06-15) -- balanced strict-mirror REASONING mix, 100% 397B
 # judge-improved traces. Built by aux_tasks/sft/build_balanced_1506.py from a stratified subset
-# of reas2_mix_image10k_text5k_video10k_0804 + judged v3 (1004) + judged mcqa_video_1505 (946).
-# Same 11,950 questions as mix_12k_1506; assistant turns carry real <think>. 374 steps/epoch @
-# tgbs 32; 3 epochs = 1179 steps. Non-reasoning: mix_12k_1506.
+# of reas2_mix_image10k_text5k_video10k_0804 + judge-filtered v3 (1042) + judged mcqa_video_1505 (946).
+# Same 13,887 questions as mix_12k_1506; assistant turns carry real <think>. 434 steps/epoch @
+# tgbs 32; 3 epochs = 1302 steps. Non-reasoning: mix_12k_1506.
 
 sft:
   max_num_epochs: 3
@@ -109,8 +109,8 @@ policy:
       end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       weight_decay_incr_style: "constant"
       lr_decay_style: "cosine"
-      lr_decay_iters: 1176
-      lr_warmup_iters: 118
+      lr_decay_iters: 1299
+      lr_warmup_iters: 130
       lr_warmup_init: 0
 
     distributed_data_parallel_config:

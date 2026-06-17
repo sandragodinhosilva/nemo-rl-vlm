@@ -63,7 +63,7 @@ policy:
   train_micro_batch_size: 1
   generation_batch_size: 16
   logprob_batch_size: 4
-  max_total_sequence_length: 32784
+  max_total_sequence_length: 62000   # RAISED from 32784: thinkoff is NOT immune to the long-video-prompt crash — a 48650-tok video prompt blew the old ceiling at step 95 (ValueError: decoder prompt longer than max_model_len). Prompt length is video-driven (num_frames 2048), same for thinkoff & thinkon. 62k fits; model supports 262144.
   precision: "bfloat16"
   offload_optimizer_for_logprob: false
 
@@ -108,7 +108,7 @@ policy:
 
   generation:
     backend: vllm
-    max_new_tokens: 16384   # safe: max video prompt (~4k) + 16384 << max_model_len 32784 (sync-worker assert)
+    max_new_tokens: 16384   # under max_model_len 62000; thinkoff responses short (~68 tok) but seqlen must fit the long VIDEO prompt
                             # vllm worker asserts response_length <= max_model_len. ~30k leaves
                             # room for the ~2k video prompt + full reasoning trace.
     temperature: 1.0

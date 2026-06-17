@@ -447,6 +447,15 @@ def verify_config(config_path: str, fix: bool = False, fix_val_period: bool = Fa
         print(f"ERROR: {e}")
         return False
 
+    # save_period validity is a RANGE check, not equality. A periodic cadence (e.g. 500 within a
+    # 2556-step epoch) that saves several times mid-run is BETTER than one-save-at-epoch-end, because
+    # a mid-run node eviction can otherwise lose the whole run (war story: job 76407 had
+    # save_period=2557 > total_steps=2556 → zero checkpoints ever written, ~14h lost). So:
+    #   - 0 < save_period <= total_steps  → ✅ valid (any periodic cadence within the run is fine)
+    #   - save_period > total_steps (or <= 0) → ❌ the only real error: it can never fire mid-run
+    # steps_per_epoch is still shown as the RECOMMENDED value, but it is not the only correct one.
+    save_period_ok = 0 < current_save_period <= total_steps
+
     current_val_period = extract_val_period(content)
     # When is val_period STALE vs DELIBERATELY DECOUPLED?
     #  - A small fixed cadence (e.g. 25 while save_period is 220) is intentional frequent validation
@@ -464,7 +473,7 @@ def verify_config(config_path: str, fix: bool = False, fix_val_period: bool = Fa
         val_period_drifted = abs(current_val_period - steps_per_epoch) <= tol
 
     all_correct = (
-        current_save_period == steps_per_epoch
+        save_period_ok
         and current_lr_decay == total_steps
         and current_lr_warmup == warmup_steps
     )
@@ -499,7 +508,15 @@ def verify_config(config_path: str, fix: bool = False, fix_val_period: bool = Fa
     def status_icon(current: int, correct: int) -> str:
         return "✅" if current == correct else "❌"
 
-    print(f"{'save_period':<30} | {current_save_period:<10} | {steps_per_epoch:<10} | {status_icon(current_save_period, steps_per_epoch)}")
+    # save_period: ✅ for any cadence in (0, total_steps]; the "Correct" column shows the recommended
+    # value (steps_per_epoch) as a hint. Only > total_steps (never fires mid-run) is ❌.
+    if save_period_ok:
+        sp_status = "✅" if current_save_period == steps_per_epoch else f"✅ periodic (rec: {steps_per_epoch})"
+        sp_correct = str(steps_per_epoch)
+    else:
+        sp_status = f"❌ > total_steps={total_steps}: never saves mid-run"
+        sp_correct = str(steps_per_epoch)
+    print(f"{'save_period':<30} | {current_save_period:<10} | {sp_correct:<10} | {sp_status}")
     print(f"{'lr_decay_iters':<30} | {current_lr_decay:<10} | {total_steps:<10} | {status_icon(current_lr_decay, total_steps)}")
     print(f"{'lr_warmup_iters':<30} | {current_lr_warmup:<10} | {warmup_steps:<10} | {status_icon(current_lr_warmup, warmup_steps)}")
     if current_val_period is not None:
@@ -548,7 +565,14 @@ def verify_config(config_path: str, fix: bool = False, fix_val_period: bool = Fa
         return False
 
     print("\n🔧 Fixing config...")
-    content = update_numeric_field(content, "save_period", steps_per_epoch)
+    # Only repair save_period when it is INVALID (> total_steps / <= 0). A valid periodic cadence
+    # (0 < save_period <= total_steps) is left untouched — clobbering it back to steps_per_epoch
+    # would re-introduce the one-save-at-end fragility (job 76407).
+    if not save_period_ok:
+        content = update_numeric_field(content, "save_period", steps_per_epoch)
+        print(f"   save_period {current_save_period} -> {steps_per_epoch} (was > total_steps={total_steps})")
+    else:
+        print(f"   save_period {current_save_period} left as-is (valid periodic cadence)")
     content = update_numeric_field(content, "lr_decay_iters", total_steps)
     content = update_numeric_field(content, "lr_warmup_iters", warmup_steps)
     if val_period_drifted and fix_val_period:

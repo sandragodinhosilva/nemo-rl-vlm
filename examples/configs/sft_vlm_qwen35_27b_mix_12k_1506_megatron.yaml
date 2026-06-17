@@ -96,8 +96,8 @@ policy:
       end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       weight_decay_incr_style: "constant"
       lr_decay_style: "cosine"
-      lr_decay_iters: 1176
-      lr_warmup_iters: 118
+      lr_decay_iters: 1299
+      lr_warmup_iters: 130
       lr_warmup_init: 0
 
     distributed_data_parallel_config:

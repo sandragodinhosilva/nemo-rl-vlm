@@ -4,7 +4,7 @@ defaults: sft.yaml
 # Built by aux_tasks/sft/build_balanced_1506.py from a stratified subset of the JUDGE-IMPROVED
 # _0804 pool (reas2_mix_image10k_text5k_video10k_0804) + judged v3 (1004, 223 codes) + judged
 # mcqa_video_1505 (946). Each nr row is the <think>-stripped twin of mix_reas_12k_1506.
-# 12,556 train = 393 steps/epoch @ tgbs 32; 3 epochs = 1179 steps. Reasoning: mix_reas_12k_1506.
+# 13,887 train = 434 steps/epoch @ tgbs 32; 3 epochs = 1302 steps. Reasoning: mix_reas_12k_1506.
 
 sft:
   max_num_epochs: 3
@@ -109,8 +109,8 @@ policy:
       end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       weight_decay_incr_style: "constant"
       lr_decay_style: "cosine"
-      lr_decay_iters: 1176
-      lr_warmup_iters: 118
+      lr_decay_iters: 1299
+      lr_warmup_iters: 130
       lr_warmup_init: 0
 
     distributed_data_parallel_config:
