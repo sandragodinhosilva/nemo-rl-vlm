@@ -2087,7 +2087,7 @@ def create_app(logs_dir):
 def main():
     parser = argparse.ArgumentParser(description="GRPO Training Dashboard")
     parser.add_argument("--logs-dir", default=DEFAULT_LOGS_DIR, help="Root directory containing run folders")
-    parser.add_argument("--port", type=int, default=7863, help="Port for Gradio server")
+    parser.add_argument("--port", type=int, default=7873, help="Port for Gradio server")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
     args = parser.parse_args()
 
