@@ -1,0 +1,76 @@
+defaults:
+  - sft_vlm_qwen35_4b_video_local_common_megatron.yaml
+
+sft:
+  max_num_epochs: 3
+  max_num_steps: 1000000
+  val_period: 25
+  val_batches: 8
+  val_global_batch_size: 32
+  val_micro_batch_size: 1
+  val_at_start: false
+  seed: 42
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_vobs2906_angle_k5majority"
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 3
+  save_period: 110   # ~330 steps/epoch (10559 rows / gbs 32); verify_and_fix_config will correct
+  checkpoint_must_save_by: null
+
+policy:
+  max_total_sequence_length: 32784
+  train_micro_batch_size: 1
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    activation_checkpointing: false
+    sequence_parallel: false
+    scheduler:
+      lr_decay_iters: 987   # ~330 steps/epoch x 3; verify_and_fix_config will correct
+      lr_warmup_iters: 99   # ~10% warmup; verify_and_fix_config will correct
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 16
+  seed: 42
+  train:
+    dataset_name: thrive-vlm-sft
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_not_reviewed_visual_obs/1806_oracle_obs_sft_train_angle_k5majority
+    split: train
+    split_validation_size: 0
+  validation:
+    dataset_name: thrive-vlm-sft
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_not_reviewed_visual_obs/1806_oracle_obs_sft_test_angle_k5majority
+    split: train
+    split_validation_size: 0
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "sft_processor"
+    skip_missing_local_media_filter: true
+    roles_to_train_on: ["assistant"]
+
+cluster:
+  gpus_per_node: 2
+  num_nodes: 1
+
+logger:
+  log_dir: "logs/sft_qwen35_4b_vobs2906_angle_k5majority"
+  wandb:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_vobs2906_angle_k5majority"
+  swanlab:
+    project: "nemo-rl"
+    name: "sft_qwen35_4b_vobs2906_angle_k5majority"
+  tensorboard:
+    log_dir: "logs/sft_qwen35_4b_vobs2906_angle_k5majority"
+  mlflow:
+    experiment_name: "nemo-rl"
+    run_name: "sft_qwen35_4b_vobs2906_angle_k5majority"
