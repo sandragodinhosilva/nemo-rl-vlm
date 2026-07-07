@@ -13,7 +13,7 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_vobs2906_categorical_k5majority"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"
   metric_name: "val:val_loss"
   higher_is_better: false
   keep_top_k: 3
@@ -24,7 +24,10 @@ policy:
   max_total_sequence_length: 32784
   train_micro_batch_size: 1
   megatron_cfg:
-    tensor_model_parallel_size: 4   # was 2; TP=4 halves per-GPU VRAM (OOM fix for job 104267)
+    tensor_model_parallel_size: 4   # TP=4 is the proven OOM-safe setting (job 104267) AND the only TP that
+    # divides Qwen3.5-4B's num_key_value_heads=4 cleanly on this Megatron-Bridge attention path — TP=8
+    # crashed job 107003 (gate.view shape mismatch in _apply_output_gate). 8 GPUs = TP=4 x DP=2 instead,
+    # matching the working scale-up pattern in sft_vlm_qwen35_4b_mcqa_video_3d_2705_2node_gbs64 (TP=2 x DP=4).
     activation_checkpointing: false
     sequence_parallel: false
     # post-save GPU-fragmentation OOM fix (feedback_post_save_oom): job 104267 OOM'd after 3h36m
@@ -32,8 +35,8 @@ policy:
     env_vars:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
     scheduler:
-      lr_decay_iters: 987   # ~330 steps/epoch x 3; verify_and_fix_config will correct
-      lr_warmup_iters: 99   # ~10% warmup; verify_and_fix_config will correct
+      lr_decay_iters: 969   # ~330 steps/epoch x 3; verify_and_fix_config will correct
+      lr_warmup_iters: 97   # ~10% warmup; verify_and_fix_config will correct
 
 data:
   _override_: true
@@ -46,7 +49,7 @@ data:
   seed: 42
   train:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_after_format_review_visual_obs/1806_oracle_obs_sft_train_categorical_k5majority
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_after_format_review_visual_obs/1806_oracle_obs_sft_train_categorical_k5majority_reasoning_judged
     split: train
     split_validation_size: 0
   validation:
@@ -62,19 +65,19 @@ data:
     roles_to_train_on: ["assistant"]
 
 cluster:
-  gpus_per_node: 4   # was 2; must match TP=4 (world_size = gpus_per_node*num_nodes ≥ TP)
+  gpus_per_node: 8   # full node; TP=4 x DP=2 (world_size 8 = gpus_per_node*num_nodes ≥ TP=4, 2 replicas)
   num_nodes: 1
 
 logger:
-  log_dir: "logs/sft_qwen35_4b_vobs2906_categorical_k5majority"
+  log_dir: "logs/sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_vobs2906_categorical_k5majority"
+    name: "sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_4b_vobs2906_categorical_k5majority"
+    name: "sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"
   tensorboard:
-    log_dir: "logs/sft_qwen35_4b_vobs2906_categorical_k5majority"
+    log_dir: "logs/sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_4b_vobs2906_categorical_k5majority"
+    run_name: "sft_qwen35_4b_vobs2906_categorical_k5majority_reasoning"

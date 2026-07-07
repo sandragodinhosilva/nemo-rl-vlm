@@ -24,9 +24,13 @@ policy:
   max_total_sequence_length: 32784
   train_micro_batch_size: 1
   megatron_cfg:
-    tensor_model_parallel_size: 2
+    tensor_model_parallel_size: 4   # was 2; TP=4 halves per-GPU VRAM (OOM fix for job 104267)
     activation_checkpointing: false
     sequence_parallel: false
+    # post-save GPU-fragmentation OOM fix (feedback_post_save_oom): job 104267 OOM'd after 3h36m
+    # with expandable_segments:False (the default). True lets the allocator reclaim fragmented VRAM.
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
     scheduler:
       lr_decay_iters: 987   # ~330 steps/epoch x 3; verify_and_fix_config will correct
       lr_warmup_iters: 99   # ~10% warmup; verify_and_fix_config will correct
@@ -42,12 +46,12 @@ data:
   seed: 42
   train:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_not_reviewed_visual_obs/1806_oracle_obs_sft_train_angle_k5severity
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_after_format_review_visual_obs/1806_oracle_obs_sft_train_angle_k5severity
     split: train
     split_validation_size: 0
   validation:
     dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_not_reviewed_visual_obs/1806_oracle_obs_sft_test_angle_k5severity
+    data_path: /mnt/data/shared/vlm/data/human_annotation_datasets/1806_after_format_review_visual_obs/1806_oracle_obs_sft_test_angle_k5severity
     split: train
     split_validation_size: 0
   default:
@@ -58,7 +62,7 @@ data:
     roles_to_train_on: ["assistant"]
 
 cluster:
-  gpus_per_node: 2
+  gpus_per_node: 4   # was 2; must match TP=4 (world_size = gpus_per_node*num_nodes ≥ TP)
   num_nodes: 1
 
 logger:

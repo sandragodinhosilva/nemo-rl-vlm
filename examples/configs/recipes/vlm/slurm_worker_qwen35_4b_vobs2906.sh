@@ -1,19 +1,21 @@
 #!/bin/bash
-# SUPERSEDED 2026-07-05 — merged into ../slurm_worker_qwen35_4b_vobs2906.sh (GPU count now
-# auto-derives from SLURM_GPUS_ON_NODE; override sizing via sbatch --gres/--cpus-per-task/--mem).
-# Kept for provenance only — do not launch this file.
 #SBATCH --job-name=sft-vlm-4b-vobs2906
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=400G
+#SBATCH --gres=gpu:4
+# Default = 4/8 GPU (2 jobs/node). Override GPU count + right-sized cpus/mem via sbatch CLI flags,
+# which win over these #SBATCH defaults, e.g.:
+#   sbatch --gres=gpu:2 --cpus-per-task=48  --mem=400G  <this>   # 2-GPU (was _2gpu.sh)
+#   sbatch --gres=gpu:8 --cpus-per-task=192 --mem=2400G <this>   # full node (was _8gpu.sh)
+# [[feedback_sft_tp_gpu_change_launch_failures]]
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=1200G
 #SBATCH --exclude=worker-30,worker-31
 #SBATCH --output=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.out
 #SBATCH --error=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.err
 
 set -euo pipefail
-SCRIPT_PATH="/home/sgsilva/nemo-rl-vlm/examples/configs/recipes/vlm/slurm_worker_qwen35_4b_vobs2906_2gpu.sh"
+SCRIPT_PATH="/home/sgsilva/nemo-rl-vlm/examples/configs/recipes/vlm/slurm_worker_qwen35_4b_vobs2906.sh"
 
 if [[ "${1:-}" != "--worker" ]]; then
     mkdir -p /home/sgsilva/nemo-rl-vlm/slurm_logs
@@ -24,11 +26,17 @@ fi
 # 1. SET UP DISTRIBUTED ENVIRONMENT VARIABLES FOR SLURM
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29400
-export RAY_ADDRESS="${MASTER_ADDR}:6379"
+# Job-unique Ray GCS port (Bug fix: a hardcoded 6379 collided with a stale/concurrent Ray head on
+# the same node → "Failed to connect to GCS within 120s" fast-fail, jobs 104265/266/268). Derive a
+# per-job port in a safe range so sibling/leftover clusters never clash.
+RAY_PORT=$(( 6379 + (SLURM_JOB_ID % 2000) ))
+export RAY_PORT
+export RAY_ADDRESS="${MASTER_ADDR}:${RAY_PORT}"
 export NODE_RANK=$SLURM_NODEID            # The rank of the current node (0 or 1)
 
-# This variable holds the number of GPUs per node
-GPUS_PER_NODE=2
+# GPUs per node, auto-derived from what SLURM actually granted this job (works for any
+# --gres=gpu:N override at submit time — 2/4/8 — no per-count script needed).
+GPUS_PER_NODE="${SLURM_GPUS_ON_NODE:-4}"
 export GPUS_PER_NODE
 
 echo "Environment check:"
@@ -113,8 +121,8 @@ export RAY_REDIS_START_RETRIES=20
 echo "Starting Ray cluster setup on node $NODE_RANK with $GPUS_PER_NODE GPUs. Master is at $MASTER_ADDR:$MASTER_PORT."
 
 if [ "$NODE_RANK" -eq 0 ]; then
-    echo "=== Starting Ray HEAD node ==="
-    $RAY_CMD start --head --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
+    echo "=== Starting Ray HEAD node on port $RAY_PORT ==="
+    $RAY_CMD start --head --port="$RAY_PORT" --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
     echo "Ray head started successfully"
 
     # Wait for initialization
@@ -126,7 +134,7 @@ else
     # Wait for head node to be ready
     sleep 15
 
-    $RAY_CMD start --address=$MASTER_ADDR:6379 --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
+    $RAY_CMD start --address=$MASTER_ADDR:$RAY_PORT --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
     echo "Ray worker node $NODE_RANK connected successfully"
     sleep 5
 fi
@@ -189,8 +197,9 @@ if [ "$NODE_RANK" -eq 0 ]; then
 
     # Run with detailed logging and real-time output.
     # CONFIG is overridable via env (default = the original incumbent config) so
-    # the reasoning-trace sweep can launch per-variant configs through one launcher:
-    #   CONFIG=examples/configs/sft_vlm_qwen35_4b_vobs2906_categorical_k5majority_megatron.yaml sbatch <this>
+    # this one launcher can run any vobs2906 variant (answer-only or reasoning) at any GPU count:
+    #   CONFIG=examples/configs/sft_vlm_qwen35_4b_vobs2906_categorical_k5majority_megatron.yaml \
+    #     sbatch examples/configs/recipes/vlm/slurm_worker_qwen35_4b_vobs2906.sh
     SFT_CONFIG="${CONFIG:?set CONFIG=examples/configs/sft_vlm_qwen35_4b_vobs2906_<variant>_megatron.yaml}"
     echo "Using SFT config: ${SFT_CONFIG}" | tee -a "$LOG_FILE"
     /home/sgsilva/nemo-rl-vlm/.venv/bin/python examples/run_vlm_sft.py \

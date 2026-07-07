@@ -23,6 +23,8 @@ policy:
   model_name: /mnt/data/shared/models/Qwen3.5-27B/
   tokenizer:
     name: ${policy.model_name}
+    chat_template_kwargs:
+      enable_thinking: false   # mix_12k non-reasoning: targets have no <think>; serve thinkOFF
   train_global_batch_size: 32
   train_micro_batch_size: 1
   max_total_sequence_length: 32768 #65536
@@ -52,7 +54,7 @@ policy:
     empty_unused_memory_level: 1
     activation_checkpointing: true
     tensor_model_parallel_size: 4
-    pipeline_model_parallel_size: 2
+    pipeline_model_parallel_size: 1   # PP=1 matches all proven 27B runs; PP=2 was never validated (fixed 2026-06-20)
     expert_tensor_parallel_size: 1
     expert_model_parallel_size: 1
     sequence_parallel: true
@@ -70,7 +72,7 @@ policy:
     moe_per_layer_logging: false
     apply_rope_fusion: false
     bias_activation_fusion: true
-    attention_backend: "flash"
+    attention_backend: "unfused"   # flash fails on short seqs (TE min seqlen, TP4 + seq_parallel); fixed 2026-06-20 after 94547 crashed
     defer_fp32_logits: false
 
     optimizer:

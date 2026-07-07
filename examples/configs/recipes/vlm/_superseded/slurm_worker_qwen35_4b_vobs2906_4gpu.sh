@@ -5,15 +5,18 @@
 #SBATCH --job-name=sft-vlm-4b-vobs2906
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=400G
+#SBATCH --gres=gpu:4
+# Right-sized to the GPU fraction: 4/8 GPU = 2 jobs/node, so take ~half a 192-CPU/2.4T node instead
+# of leaving it idle (was 48/400 → 96 CPU + 1.6T sat unused per node). More num_workers headroom +
+# host-RAM OOM margin. [[feedback_sft_tp_gpu_change_launch_failures]]
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=1200G
 #SBATCH --exclude=worker-30,worker-31
 #SBATCH --output=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.out
 #SBATCH --error=/home/sgsilva/nemo-rl-vlm/slurm_logs/slurm-%j.err
 
 set -euo pipefail
-SCRIPT_PATH="/home/sgsilva/nemo-rl-vlm/examples/configs/recipes/vlm/slurm_worker_qwen35_4b_vobs2906_2gpu.sh"
+SCRIPT_PATH="/home/sgsilva/nemo-rl-vlm/examples/configs/recipes/vlm/slurm_worker_qwen35_4b_vobs2906_4gpu.sh"
 
 if [[ "${1:-}" != "--worker" ]]; then
     mkdir -p /home/sgsilva/nemo-rl-vlm/slurm_logs
@@ -24,11 +27,16 @@ fi
 # 1. SET UP DISTRIBUTED ENVIRONMENT VARIABLES FOR SLURM
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29400
-export RAY_ADDRESS="${MASTER_ADDR}:6379"
+# Job-unique Ray GCS port (Bug fix: a hardcoded 6379 collided with a stale/concurrent Ray head on
+# the same node → "Failed to connect to GCS within 120s" fast-fail, jobs 104265/266/268). Derive a
+# per-job port in a safe range so sibling/leftover clusters never clash.
+RAY_PORT=$(( 6379 + (SLURM_JOB_ID % 2000) ))
+export RAY_PORT
+export RAY_ADDRESS="${MASTER_ADDR}:${RAY_PORT}"
 export NODE_RANK=$SLURM_NODEID            # The rank of the current node (0 or 1)
 
 # This variable holds the number of GPUs per node
-GPUS_PER_NODE=2
+GPUS_PER_NODE=4
 export GPUS_PER_NODE
 
 echo "Environment check:"
@@ -113,8 +121,8 @@ export RAY_REDIS_START_RETRIES=20
 echo "Starting Ray cluster setup on node $NODE_RANK with $GPUS_PER_NODE GPUs. Master is at $MASTER_ADDR:$MASTER_PORT."
 
 if [ "$NODE_RANK" -eq 0 ]; then
-    echo "=== Starting Ray HEAD node ==="
-    $RAY_CMD start --head --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
+    echo "=== Starting Ray HEAD node on port $RAY_PORT ==="
+    $RAY_CMD start --head --port="$RAY_PORT" --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
     echo "Ray head started successfully"
 
     # Wait for initialization
@@ -126,7 +134,7 @@ else
     # Wait for head node to be ready
     sleep 15
 
-    $RAY_CMD start --address=$MASTER_ADDR:6379 --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
+    $RAY_CMD start --address=$MASTER_ADDR:$RAY_PORT --disable-usage-stats --num-gpus="$GPUS_PER_NODE"
     echo "Ray worker node $NODE_RANK connected successfully"
     sleep 5
 fi

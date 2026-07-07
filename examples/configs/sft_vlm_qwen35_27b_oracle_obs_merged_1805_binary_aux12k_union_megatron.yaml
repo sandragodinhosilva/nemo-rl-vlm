@@ -1,7 +1,16 @@
 defaults: sft.yaml
 
+# Oracle-obs SFT — NON-REASONING 4-source mix: merged-1805 VO (cat+angle+cat_1q+angle_1q, 77,186)
+#   + llm_fms-only (16,240) + 1805_binary (31,721) + aux-12k mix_12k_1506 train (13,887).
+# POST-HANDOFF dataset (2026-06-17): 44 flip-affected sessions excluded + gendered sentence stripped.
+# TARGET = empty <think></think> then the answer ([VISUAL OBSERVATIONS] / MCQA / "Answer: yes|no" / point/text).
+# Dataset: /mnt/data/sgsilva/datasets/1805/oracle_obs_merged_1805_binary_aux12k_union_sft_train  (139,034 rows)
+# 139,034 rows → 1 epoch → ceil(0.95*139034/32) = 4128 steps → 4128 total (1ep).
+# attention_backend: unfused — required; TE flash fails on short sequences (TP=4 + seq_parallel).
+# enable_thinking: false — targets use empty <think></think>; must match serving config (thinkoff).
+
 sft:
-  max_num_epochs: 3
+  max_num_epochs: 1
   max_num_steps: 1000000
   val_period: 100000
   val_batches: 8
@@ -12,22 +21,23 @@ sft:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_27b_mix_reas_12k_1506"
-  metric_name: "val:val_loss"
+  checkpoint_dir: "/mnt/data/sgsilva/checkpoints/sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
+  metric_name: null  # val effectively off (val_period=100000); save on step cadence, keep latest keep_top_k
   higher_is_better: false
   keep_top_k: 3
-  save_period: 393
+  save_period: 500  # ~every 3h at ~22s/step; bounds eviction-loss + disk (keep latest 3).
   checkpoint_must_save_by: null
 
 policy:
   model_name: /mnt/data/shared/models/Qwen3.5-27B/
   tokenizer:
     name: ${policy.model_name}
+    chat_template: null
     chat_template_kwargs:
-      enable_thinking: true   # mix_reas: 100% of targets carry non-empty <think>; serve thinkON
+      enable_thinking: false
   train_global_batch_size: 32
   train_micro_batch_size: 1
-  max_total_sequence_length: 32768 #65536
+  max_total_sequence_length: 65536
   precision: "bfloat16"
 
   offload_optimizer_for_logprob: false
@@ -54,7 +64,7 @@ policy:
     empty_unused_memory_level: 1
     activation_checkpointing: true
     tensor_model_parallel_size: 4
-    pipeline_model_parallel_size: 1   # PP=1 matches all proven 27B runs; PP=2 was never validated (fixed 2026-06-20)
+    pipeline_model_parallel_size: 1
     expert_tensor_parallel_size: 1
     expert_model_parallel_size: 1
     sequence_parallel: true
@@ -72,7 +82,7 @@ policy:
     moe_per_layer_logging: false
     apply_rope_fusion: false
     bias_activation_fusion: true
-    attention_backend: "unfused"   # flash fails on short seqs (TE min seqlen, TP4 + seq_parallel); fixed 2026-06-20 after 94548 crashed
+    attention_backend: "unfused"  # flash fails on short sequences (TE min seqlen constraint with TP=4 + seq_parallel)
     defer_fp32_logits: false
 
     optimizer:
@@ -90,28 +100,28 @@ policy:
       use_distributed_optimizer: true
       use_precision_aware_optimizer: true
       clip_grad: ${policy.max_grad_norm}
-      optimizer_cpu_offload: true  # Enable to reduce GPU memory usage
-      optimizer_offload_fraction: 1.0  # Offload all optimizer states to CPU
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
 
     scheduler:
       start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
       weight_decay_incr_style: "constant"
       lr_decay_style: "cosine"
-      lr_decay_iters: 1299
-      lr_warmup_iters: 130
+      lr_decay_iters: 4127  # 1 epoch; ceil(0.95*139034/32)
+      lr_warmup_iters: 413  # ~10% of decay
       lr_warmup_init: 0
 
     distributed_data_parallel_config:
       grad_reduce_in_fp32: false
-      overlap_grad_reduce: false  # Enable for better memory efficiency
-      overlap_param_gather: false  # Enable for better memory efficiency
+      overlap_grad_reduce: false
+      overlap_param_gather: false
       average_in_collective: true
       use_custom_fsdp: false
       data_parallel_sharding_strategy: "optim_grads_params"
 
     env_vars:
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
 data:
   _override_: true
@@ -124,12 +134,9 @@ data:
   seed: 42
   train:
     - dataset_name: thrive-vlm-sft
-      data_path: /mnt/data/shared/vlm/data/merged_aux_datasets/mix_reas_12k_1506
+      data_path: /mnt/data/sgsilva/datasets/1805/oracle_obs_merged_1805_binary_aux12k_union_sft_train
       split: train
-  validation:
-    dataset_name: thrive-vlm-sft
-    data_path: /mnt/data/shared/vlm/data/merged_aux_datasets/mix_reas_12k_1506
-    split: validation
+  validation: null
   default:
     prompt_file: null
     system_prompt_file: null
@@ -138,7 +145,7 @@ data:
     roles_to_train_on: ["assistant"]
 
 logger:
-  log_dir: "logs/sft_qwen35_27b_mix_reas_12k_1506"
+  log_dir: "logs/sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
   wandb_enabled: false
   tensorboard_enabled: true
   mlflow_enabled: false
@@ -146,15 +153,15 @@ logger:
   monitor_gpus: true
   wandb:
     project: "nemo-rl"
-    name: "sft_qwen35_27b_mix_reas_12k_1506"
+    name: "sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
   swanlab:
     project: "nemo-rl"
-    name: "sft_qwen35_27b_mix_reas_12k_1506"
+    name: "sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
   tensorboard:
-    log_dir: "logs/sft_qwen35_27b_mix_reas_12k_1506"
+    log_dir: "logs/sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
   mlflow:
     experiment_name: "nemo-rl"
-    run_name: "sft_qwen35_27b_mix_reas_12k_1506"
+    run_name: "sft_qwen35_27b_oracle_obs_merged_1805_binary_aux12k_union"
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10
