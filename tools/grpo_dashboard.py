@@ -1703,6 +1703,129 @@ class AppState:
 
 
 # ---------------------------------------------------------------------------
+# Live status (pre-step-1 visibility): show a run the moment it launches, before
+# any train_data_step*.jsonl exists. Reads val_data_step0.jsonl (val_at_start) +
+# the newest per-node training log so you can see init / generation / first val
+# while the run is still warming up. discover_runs() only lists runs that already
+# have train data; this scans ALL exp_* dirs regardless.
+# ---------------------------------------------------------------------------
+
+# Phase markers the trainer prints, newest-wins, for a one-line status.
+_PHASE_PATTERNS = [
+    (r"Step (\d+)/(\d+)", "training step {0}/{1}"),
+    (r"Training policy", "training policy (optimizer update)"),
+    (r"Computing logprobs", "computing logprobs"),
+    (r"Preparing for training", "preparing for training"),
+    (r"Generating responses", "generating rollouts"),
+    (r"Starting validation at step (\d+)", "validation at step {0}"),
+    (r"Running initial validation", "initial validation (val_at_start)"),
+    (r"Processed prompts:\s*100%", "generation batch complete"),
+    (r"Model loading took", "loading model"),
+    (r"Starting Ray", "starting Ray cluster"),
+]
+
+
+def _newest_node_log(logs_dir, run_name):
+    """Newest per-node training log for a run, searched across date subdirs.
+
+    The trainer writes <logs_dir>/<YYYYMMDD>/<stem>_node_0_*.log where the stem
+    derives from the launch script, not the run folder name — so match on a token
+    shared with the run name (e.g. 'mix_12k_1506') rather than the exact folder.
+    """
+    token = run_name.replace("grpo_", "").replace("_thinkoff", "").replace("_thinkon", "")
+    cands = glob.glob(os.path.join(logs_dir, "*", "*node_0*.log"))
+    cands = [c for c in cands if token in os.path.basename(c)] or cands
+    if not cands:
+        return None
+    return max(cands, key=lambda p: os.path.getmtime(p))
+
+
+def _val_at_start_accuracy(exp_path):
+    """Read validation/accuracy from val_data_step0.jsonl if present (the SFT-init anchor)."""
+    fp = os.path.join(exp_path, "val_data_step0.jsonl")
+    if not os.path.exists(fp):
+        return None
+    rewards = []
+    try:
+        with open(fp) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                r = rec.get("rewards", rec.get("reward", rec.get("accuracy")))
+                if isinstance(r, list):
+                    r = sum(r) / len(r) if r else None
+                if isinstance(r, (int, float)):
+                    rewards.append(float(r))
+    except Exception:
+        return None
+    if not rewards:
+        return None
+    return sum(rewards) / len(rewards)
+
+
+def _tail(path, n=25):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except Exception:
+        return ""
+
+
+def live_status(logs_dir, tail_lines=25):
+    """Markdown status for EVERY run dir (incl. pre-step-1), newest activity first."""
+    rows = []
+    for name in sorted(os.listdir(logs_dir)):
+        run_dir = os.path.join(logs_dir, name)
+        if not os.path.isdir(run_dir):
+            continue
+        exp_dirs = sorted(glob.glob(os.path.join(run_dir, "exp_*")))
+        if not exp_dirs:
+            continue
+        exp = exp_dirs[-1]
+        n_train = len(glob.glob(os.path.join(exp, "train_data_step*.jsonl")))
+        va = _val_at_start_accuracy(exp)
+        log = _newest_node_log(logs_dir, name)
+        phase, mtime, tail_txt = "unknown", 0, ""
+        if log:
+            mtime = os.path.getmtime(log)
+            tail_txt = _tail(log, tail_lines)
+            # Scan a wider window (last ~400 lines) for the newest phase marker — vLLM
+            # progress bars can flood the immediate tail and bury the 'Step N/240' line.
+            scan_txt = _tail(log, 400)
+            best_idx, best = -1, "unknown"
+            scan_lines = scan_txt.splitlines()
+            for i, ln in enumerate(scan_lines):
+                for pat, label in _PHASE_PATTERNS:
+                    m = re.search(pat, ln)
+                    if m and i >= best_idx:
+                        best_idx, best = i, label.format(*m.groups())
+            phase = best
+        rows.append((mtime, name, exp, n_train, va, phase, log, tail_txt))
+
+    if not rows:
+        return "No GRPO run directories found under `%s`." % logs_dir, ""
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    md = ["| run | phase | train steps done | val@start acc | last activity |",
+          "|---|---|---|---|---|"]
+    for mtime, name, exp, n_train, va, phase, log, _ in rows:
+        import time as _t
+        when = _t.strftime("%H:%M:%S", _t.localtime(mtime)) if mtime else "—"
+        va_s = f"{va:.4f}" if va is not None else "—"
+        vis = "✅ in Compare" if n_train else "⏳ pre-step-1"
+        md.append(f"| `{name}` ({vis}) | {phase} | {n_train} | {va_s} | {when} |")
+    md.append("\n*val@start acc = SFT-init accuracy before any GRPO step (the bar to beat). "
+              "A run appears in **Compare Runs** only after step 1 writes train_data_step1.jsonl.*")
+
+    newest = rows[0]
+    detail = (f"### Newest: `{newest[1]}` — {newest[5]}\n"
+              f"log: `{newest[6]}`\n\n```\n{newest[7][-4000:]}\n```")
+    return "\n".join(md), detail
+
+
+# ---------------------------------------------------------------------------
 # Build Gradio app
 # ---------------------------------------------------------------------------
 
@@ -1712,6 +1835,23 @@ def create_app(logs_dir):
 
     with gr.Blocks(title="GRPO Training Dashboard", theme=gr.themes.Soft()) as app:
         gr.Markdown("# GRPO Training Dashboard\nCompare runs, visualize reward metrics, and browse rollouts.")
+
+        # ===== Tab 0: Live Status (pre-step-1 visibility) =====
+        with gr.Tab("Live Status"):
+            gr.Markdown(
+                "See every run the moment it launches — phase, val@start accuracy, and the live "
+                "log tail — **before** step 1 makes it appear in *Compare Runs*. Click refresh to update."
+            )
+            live_refresh_btn = gr.Button("🔄 Refresh", variant="primary")
+            live_table = gr.Markdown()
+            live_detail = gr.Markdown()
+
+            def _do_live():
+                return live_status(logs_dir)
+
+            live_refresh_btn.click(_do_live, outputs=[live_table, live_detail])
+            # populate on load
+            app.load(_do_live, outputs=[live_table, live_detail])
 
         # ===== Tab 1: Compare Runs =====
         with gr.Tab("Compare Runs"):

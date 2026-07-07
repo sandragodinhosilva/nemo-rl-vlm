@@ -83,6 +83,10 @@ def format_thrive_vlm_grpo_dataset(
             content["max_pixels"] = int(example["max_pixels"])
         if "min_pixels" in example:
             content["min_pixels"] = int(example["min_pixels"])
+        # DISABLED 2026-06-18 (sgsilva): size override off (see SFT path OOM note).
+        # Also NOT in upstream — GRPO path only had per-example max_pixels.
+        # if "max_pixels" not in example and "min_pixels" not in example:
+        #     content["size"] = {"longest_edge": 102_000_000, "shortest_edge": 4_096}
 
         return frames, content
 
@@ -162,7 +166,19 @@ def format_thrive_vlm_grpo_dataset(
         if len(messages) >= 1:
             # First message: system prompt
             if messages[0].get("role") == "system":
-                system_prompt = messages[0].get("content", "")
+                s_content = messages[0].get("content", "")
+                if isinstance(s_content, list):
+                    # list-shaped content (e.g. mix_12k_1506: [{"type":"text","text":...,
+                    # "image_url":{"url":""}}]). Extract text only — passing the list through keeps
+                    # the image_url key, and the Qwen chat template raises
+                    # "System message cannot contain images" even when the url is empty.
+                    system_prompt = "".join(
+                        item.get("text", "")
+                        for item in s_content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    ).strip()
+                else:
+                    system_prompt = s_content
         if len(messages) >= 2:
             # Second message: user question
             if messages[1].get("role") == "user":
@@ -178,7 +194,18 @@ def format_thrive_vlm_grpo_dataset(
         if len(messages) >= 3:
             # Third message: assistant answer (ground truth)
             if messages[2].get("role") == "assistant":
-                assistant_content = str(messages[2].get("content", "")).strip()
+                a_content = messages[2].get("content", "")
+                if isinstance(a_content, list):
+                    # list-shaped content (e.g. mix_12k_2005: [{"type":"text","text":"D"}]).
+                    # Join all text items, mirroring the user-text branch above. A bare
+                    # str() on the list would emit its Python repr and break reward parsing.
+                    assistant_content = "".join(
+                        item.get("text", "")
+                        for item in a_content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    ).strip()
+                else:
+                    assistant_content = str(a_content).strip()
 
     # Fallback to direct fields if messages not found
     if not question_text:
@@ -285,6 +312,24 @@ def prepare_thrive_vlm_grpo_dataset(
 
     # Load dataset from disk using load_from_disk
     raw = load_from_disk(dataset_name)
+
+    # GUARD: video dataset without need_to_flip would silently train on
+    # MIRRORED frames (the per-example `.get("need_to_flip", False)` skips the
+    # un-mirroring flip) — inverting every L/R judgment. Same guard as the SFT
+    # loader (thrive_vlm.py); root-caused 2026-07-07 on the EXP-B stage-2
+    # family. All Thrive/SWORD video is stored mirrored → column REQUIRED.
+    _splits_to_check = (
+        raw.values() if hasattr(raw, "keys") and callable(raw.keys) else [raw]
+    )
+    for _ds in _splits_to_check:
+        cols = set(_ds.column_names)
+        if ({"video_frames", "video"} & cols) and "need_to_flip" not in cols:
+            raise ValueError(
+                f"Video dataset '{dataset_name}' has {sorted({'video_frames', 'video'} & cols)} "
+                f"but NO 'need_to_flip' column — refusing to train: the loader would "
+                f"silently skip the un-mirroring flip and the model would learn "
+                f"inverted left/right. Backfill the column or fix the builder."
+            )
 
     # Check if raw is a DatasetDict or a single Dataset
     if hasattr(raw, "keys") and callable(raw.keys):

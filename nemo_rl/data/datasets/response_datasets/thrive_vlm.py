@@ -345,6 +345,29 @@ def prepare_thrive_vlm_dataset(
     # Load dataset from disk using load_from_disk
     raw = load_from_disk(dataset_name)
 
+    # GUARD: a VIDEO dataset without a need_to_flip column would silently train
+    # on MIRRORED frames (format_thrive_vlm_dataset's `.get("need_to_flip",
+    # False)` skips the un-mirroring flip) while eval flips — inverting every
+    # left/right judgment the model learns. All Thrive/SWORD video is stored
+    # mirrored, so the column is REQUIRED on every video dataset; fail at
+    # setup, before any GPU time. Root-caused 2026-07-07 on the EXP-B stage-2
+    # family (61% which-leg inversion at eval; audit report
+    # 2026-07-07_expb_stage2_lr_inversion_audit.md).
+    _splits_to_check = (
+        raw.values() if hasattr(raw, "keys") and callable(raw.keys) else [raw]
+    )
+    for _ds in _splits_to_check:
+        cols = set(_ds.column_names)
+        if ({"video_frames", "video"} & cols) and "need_to_flip" not in cols:
+            raise ValueError(
+                f"Video dataset '{dataset_name}' has {sorted({'video_frames', 'video'} & cols)} "
+                f"but NO 'need_to_flip' column — refusing to train: the loader would "
+                f"silently skip the un-mirroring flip and the model would learn "
+                f"inverted left/right. Backfill the column (all Thrive video needs "
+                f"need_to_flip=True unless frames were pre-flipped) or fix the "
+                f"builder to carry it from the source split."
+            )
+
     # Check if raw is a DatasetDict or a single Dataset
     if hasattr(raw, 'keys') and callable(raw.keys):
         # It's a DatasetDict with splits
@@ -457,6 +480,14 @@ class ThriveVLMDataset:
         self.data_config = None
         self.processor = None
         self.val_dataset = self.formatted_ds.get("validation")
+        # split_validation_size=0 means "no derived validation": prepare_thrive_vlm_dataset
+        # then returns the FULL train set as the "validation" view. Exposing that as
+        # val_dataset makes run_sft.py concatenate the whole train set into validation
+        # alongside any explicit data.validation entry, contaminating val_loss (which
+        # checkpointing keep_top_k selects on). Configs that set 0 always provide an
+        # explicit validation dataset, so drop the train-copy here.
+        if split == "train" and float(split_validation_size or 0) <= 0:
+            self.val_dataset = None
 
     @property
     def dataset(self):

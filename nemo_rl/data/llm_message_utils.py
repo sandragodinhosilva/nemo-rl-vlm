@@ -829,6 +829,11 @@ def get_formatted_message_log(
                 # Build videos_kwargs with metadata
                 videos_kwargs_dict = {
                     "do_sample_frames": False,
+                    # DISABLED 2026-06-18 (sgsilva): this size override caused CUDA OOM
+                    # at step 102 (47.8 GiB backward alloc) on un-strided high-frame
+                    # clips (frames x H x W > the 102M budget). Pending colleague's
+                    # answer on how their runs avoid it (data striding vs loader cap).
+                    # "size": {"longest_edge": 102_000_000, "shortest_edge": 4_096},
                 }
                 if video_metadata_from_content is not None:
                     # Pass as list for proper batching by the video processor
@@ -854,6 +859,11 @@ def get_formatted_message_log(
                     "add_special_tokens": False,
                 }
                 if len(images_cur_message) > 0:
+                    # DISABLED 2026-06-18 (sgsilva): size override off (see videos_kwargs
+                    # note above re: OOM). Also NOT in upstream — image path was unmodified.
+                    # processor_kwargs["size"] = {
+                    #     "longest_edge": 102_000_000, "shortest_edge": 4_096,
+                    # }
                     # Preserve the existing single-image calling convention, but
                     # group multi-image single-sample inputs so Qwen processors
                     # do not mistake them for a batch of independent prompts.

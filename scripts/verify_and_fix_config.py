@@ -265,10 +265,17 @@ def inspect_thrive_vlm_entry(entry: dict[str, Any], config: dict[str, Any]) -> d
         derived_val = base_dataset
 
     if split == "train":
+        # split_validation_size=0 → the loader now exposes NO derived validation
+        # (ThriveVLMDataset drops the train-copy val view; 2026-07-04 fix).
+        implicit = (
+            (f"{base_label}#derived_validation", len(derived_val))
+            if split_validation_size > 0
+            else None
+        )
         return {
             "size": len(derived_train),
             "label": base_label,
-            "implicit_validation": (f"{base_label}#derived_validation", len(derived_val)),
+            "implicit_validation": implicit,
             "kind": "hf_dataset_or_split",
         }
     if split == "validation":

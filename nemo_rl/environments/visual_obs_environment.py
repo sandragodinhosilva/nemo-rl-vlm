@@ -693,6 +693,25 @@ class ThriveVLMEnvironment(EnvironmentInterface):
             answers=None,
         )
 
+    @staticmethod
+    def _mean_per_group_std(prompts: "torch.Tensor", rewards: "torch.Tensor") -> float:
+        """Reward-collapse canary: mean over prompt-groups of the within-group reward std.
+
+        GRPO's advantage is (r - group_mean)/group_std; when within-group reward std -> 0 there
+        is no learning signal and the policy can collapse onto a low-variance attractor (see
+        ~/.claude/reports/2026-06-26_grpo_ordinal_distance_reward_collapse.md). Watching this
+        trend to 0 is the leading indicator — it shows before val accuracy moves. Groups by
+        unique prompt rows, mirroring calculate_pass_rate_per_prompt. Local-only metric.
+        """
+        unique_prompts = torch.unique(prompts, dim=0)
+        stds = []
+        for i in range(len(unique_prompts)):
+            mask = (prompts == unique_prompts[i]).all(1)
+            g = rewards[mask].float()
+            if g.numel() > 1:
+                stds.append(g.std(unbiased=False).item())
+        return float(sum(stds) / len(stds)) if stds else 0.0
+
     def global_post_process_and_metrics(
         self, batch: BatchedDataDict[Any]
     ) -> tuple[BatchedDataDict[Any], dict[str, float | int]]:
@@ -722,6 +741,11 @@ class ThriveVLMEnvironment(EnvironmentInterface):
             "avg_reward": batch["rewards"].mean().item(),
             "avg_reward_correct_endings": avg_reward_correct,
             "pass@samples_per_prompt": calculate_pass_rate_per_prompt(
+                batch["text"], batch["rewards"]
+            ),
+            # reward-collapse canary (local-only): within-group reward std, mean over prompts.
+            # -> 0 means GRPO has no signal to learn from (report 2026-06-26).
+            "avg_reward_std": self._mean_per_group_std(
                 batch["text"], batch["rewards"]
             ),
             "fraction_of_samples_properly_ended": batch["is_end"].float().mean().item(),
