@@ -279,6 +279,25 @@ def format_thrive_vlm_grpo_dataset(
     if task_type == "comparison":
         extra_env_info["expected_verdict"] = example.get("expected_verdict", "")
 
+    # Tool-rollout rows (LOCAL-ONLY, sgsilva 2026-07-13 — multi-turn query_obs
+    # GRPO, report 2026-07-13_grpo_vobs_tool_scaffold.md §4.1). Reward family
+    # stays "repetition" (final [ERRORS]/[SCORES] block vs GT); the flag routes
+    # the ENV to the multi-turn tool branch, and (folder_name, repetition_id)
+    # is the ObsTable key. Hard-fail on a missing key — a tool row silently
+    # falling through to single-shot would train the wrong objective.
+    if dataset_type == "vobs_tool":
+        folder_name = str(example.get("folder_name", "") or "")
+        repetition_id = str(example.get("repetition_id", "") or "")
+        if not folder_name or not repetition_id:
+            raise ValueError(
+                "vobs_tool row missing folder_name/repetition_id "
+                f"(sample_id={sample_id!r}) — the GRPO tool env cannot key the "
+                "obs bank; fix the dataset builder."
+            )
+        extra_env_info["tool_rollout"] = True
+        extra_env_info["folder_name"] = folder_name
+        extra_env_info["repetition_id"] = repetition_id
+
     ret = {
         "messages": result_messages,
         "task_name": "thrive-vlm",

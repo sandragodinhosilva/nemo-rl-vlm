@@ -468,6 +468,37 @@ def run_multi_turn_rollout(
         truncation_mask = torch.zeros_like(env_output.terminateds, dtype=torch.bool)
         for i, global_idx in enumerate(active_indices.tolist()):
             env_obs_content = env_output.observations[i]["content"]
+            # LOCAL-ONLY (sgsilva 2026-07-13, tool-rollout GRPO — report
+            # 2026-07-13_grpo_vobs_tool_scaffold.md §4.3): a role:"tool"
+            # observation is stored as the FULL Qwen chat-template turn text
+            # (wrapper copied from the Qwen3.5 template's tool branch), and the
+            # static vllm_content prompt string is extended with the decoded
+            # assistant turn + this wrapped tool turn. Without this, turn-2
+            # generation would be re-prompted with the ORIGINAL vllm_content
+            # string — the model's own tool call and the tool result silently
+            # dropped (the string path in vllm/utils.py wins over token ids).
+            # Wrapping the message-log copy with the SAME text keeps the
+            # flattened training context byte-identical to the vLLM prompt.
+            # No existing env returns role:"tool", so this is unreachable for
+            # every current single-shot config.
+            if env_output.observations[i].get("role") == "tool":
+                assistant_text = tokenizer.decode(
+                    generated_ids[i], skip_special_tokens=False
+                )
+                _im_end = "<|im_end|>"
+                _prefix = "\n" if assistant_text.rstrip().endswith(_im_end) else f"{_im_end}\n"
+                env_obs_content = (
+                    _prefix
+                    + "<|im_start|>user\n<tool_response>\n"
+                    + env_obs_content
+                    + "\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+                )
+                if "vllm_content" in current_batch:
+                    current_batch["vllm_content"][global_idx] = (
+                        current_batch["vllm_content"][global_idx]
+                        + assistant_text
+                        + env_obs_content
+                    )
             # Tokenize the raw content from the environment
             # TODO @sahilj: handle if we want these subsequent messages to have a chat template
             tokenized_obs = tokenizer(

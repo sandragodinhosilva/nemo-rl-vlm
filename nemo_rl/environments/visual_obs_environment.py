@@ -42,6 +42,12 @@ from nemo_rl.environments.visual_obs_rep_rewards import (
 from nemo_rl.environments.visual_obs_rewards import (
     compute_visual_obs_reward,
 )
+from nemo_rl.environments.visual_obs_tool_rollout import (
+    compute_tool_final_reward,
+    dispatch_tool_calls,
+    make_obs_backend,
+    parse_tool_calls,
+)
 from nemo_rl.environments.metrics import (
     calculate_pass_rate_per_prompt,
 )
@@ -83,6 +89,14 @@ class ThriveVLMEnvConfig(TypedDict):
     # Judge configuration - when enabled, LLM judge is used instead of rule-based verification
     # The judge can work with any reward_mode to determine how to evaluate and score responses
     judge: Optional[JudgeConfig]
+    # Multi-turn query_obs tool-loop rollouts (LOCAL-ONLY, sgsilva 2026-07-13 —
+    # report 2026-07-13_grpo_vobs_tool_scaffold.md). Keys: enabled, obs_bank_path,
+    # bank_mode (model_obs|corrupted|gt — gt is canary-only), corruption_rate,
+    # corruption_seed, model_obs_bank_path, max_tool_rounds, f1_weight,
+    # detection_weight, severity_weight, correctness_weight, format_weight,
+    # malformed_call_penalty, offbank_question_penalty, round_penalty,
+    # question_penalty. Requires grpo.max_rollout_turns > 1 in the recipe.
+    tool_rollout: Optional[dict]
 
 
 
@@ -461,6 +475,14 @@ class ThriveVLMEnvironment(EnvironmentInterface):
         self.num_workers = cfg["num_workers"]
         self._step_call_count = 0
 
+        # Tool-rollout bridge (LOCAL-ONLY, sgsilva 2026-07-13). Bank loads once
+        # per env actor; the bank MODE is reward-design-critical (§2.0b of the
+        # scaffold report) — make_obs_backend prints loudly on the gt canary mode.
+        self.tool_cfg = cfg.get("tool_rollout") or {}
+        self.tool_backend = (
+            make_obs_backend(self.tool_cfg) if self.tool_cfg.get("enabled") else None
+        )
+
         # Always create rule-based verify workers
         self.verify_workers = [
             ThriveVLMVerifyWorker.options(  # type: ignore # (decorated with @ray.remote)
@@ -526,6 +548,21 @@ class ThriveVLMEnvironment(EnvironmentInterface):
         Returns:
             EnvironmentReturn: A tuple containing observations, metadata, stop strings, rewards, and done flags.
         """
+        # Tool-rollout branch (LOCAL-ONLY, sgsilva 2026-07-13): rows flagged by
+        # the loader take the multi-turn path. Batches must be homogeneous —
+        # a mixed batch would need two interleaved return paths; refuse loudly
+        # rather than silently mis-scoring either side.
+        if self.tool_backend is not None:
+            is_tool_row = [bool(m.get("tool_rollout")) for m in metadata]
+            if any(is_tool_row):
+                if not all(is_tool_row):
+                    raise ValueError(
+                        "tool_rollout is enabled and this batch mixes tool rows with "
+                        f"non-tool rows ({sum(is_tool_row)}/{len(is_tool_row)} tool). "
+                        "Use a homogeneous vobs_tool dataset for tool-rollout GRPO."
+                    )
+                return self._step_tool_rollout(message_log_batch, metadata)
+
         # Extract the assistant's responses from the message history
         assistant_response_batch = []
         full_response_batch = []
@@ -690,6 +727,110 @@ class ThriveVLMEnvironment(EnvironmentInterface):
             next_stop_strings=next_stop_strings,
             rewards=rewards,
             terminateds=done,
+            answers=None,
+        )
+
+    def _step_tool_rollout(  # LOCAL-ONLY (sgsilva 2026-07-13) — tool-loop GRPO bridge
+        self,
+        message_log_batch: list[list[dict[str, str]]],
+        metadata: list[ThriveVLMEnvironmentMetadata],
+    ) -> EnvironmentReturn:
+        """Multi-turn step: execute query_obs mid-rollout or score the final turn.
+
+        Per row, inspects the LAST assistant turn only (a <tool_call> turn must
+        never reach the answer parser — report §4.2):
+        - tool call(s) present and round budget left → dispatch ALL calls in the
+          turn (multibatch shape), return the tool text as a role:"tool"
+          observation with reward 0.0 / terminateds 0. The rollout loop injects
+          it (loss-masked by role, grpo.py:1717) and resumes generation.
+        - otherwise the turn is the final answer → f1-anchored composite with
+          the multiplicative tool penalty (report §2.2), terminateds 1.
+        Round/penalty counters ride in metadata, which the rollout loop
+        round-trips into extra_env_info each turn — the env stays stateless.
+        next_stop_strings stays None on purpose: the probe's stop-seq-in-<think>
+        bug (2026-07-12) showed why "</tool_call>" as a stop string is unsafe.
+        """
+        max_rounds = int(self.tool_cfg.get("max_tool_rounds", 4))
+        observations: list[dict[str, str]] = []
+        rewards_list: list[float] = []
+        terminateds_list: list[float] = []
+
+        self._step_call_count += 1
+        should_print = (self._step_call_count % 64 == 1)
+
+        for idx, (conversation, meta) in enumerate(zip(message_log_batch, metadata)):
+            last_assistant = ""
+            for interaction in reversed(conversation):
+                if interaction["role"] == "assistant":
+                    last_assistant = interaction["content"]
+                    break
+
+            folder_name = meta.get("folder_name", "")
+            repetition_id = meta.get("repetition_id", "")
+            if not folder_name or not repetition_id:
+                raise ValueError(
+                    "tool_rollout row is missing folder_name/repetition_id in "
+                    f"extra_env_info (sample_id={meta.get('sample_id', '')!r}) — "
+                    "the loader must hard-fail before this; refusing to guess."
+                )
+
+            calls = parse_tool_calls(last_assistant)
+            rounds = int(meta.get("tool_rounds", 0))
+
+            if calls and rounds < max_rounds:
+                asked = list(meta.get("tool_asked") or [])
+                tool_text, counters = dispatch_tool_calls(
+                    calls, self.tool_backend, folder_name, repetition_id, asked
+                )
+                meta["tool_asked"] = asked
+                meta["tool_rounds"] = rounds + 1
+                for key, value in counters.items():
+                    meta["tool_" + key] = int(meta.get("tool_" + key, 0)) + int(value)
+                observations.append({"role": "tool", "content": tool_text})
+                # Intermediate turns MUST return exactly 0.0 — the rollout loop
+                # ACCUMULATES per-turn rewards (rollouts.py:464).
+                rewards_list.append(0.0)
+                terminateds_list.append(0.0)
+                if should_print and idx < 2:
+                    print(
+                        f"\n[Tool rollout {idx}] (id={meta.get('sample_id','')}) "
+                        f"round {rounds + 1}/{max_rounds}: {counters}",
+                        flush=True,
+                    )
+            else:
+                # Final answer (or round budget exhausted — an unanswered
+                # tool-call turn parses as no answer and scores ~0, the
+                # implicit strong penalty).
+                cleaned = re.sub(
+                    r'^.*?</think>\s*', '', last_assistant, flags=re.DOTALL
+                ).strip()
+                reward, details = compute_tool_final_reward(
+                    cleaned, meta["ground_truth"], meta, self.tool_cfg
+                )
+                meta["reward_details"] = details
+                observations.append(
+                    {"role": "environment", "content": f"Environment: reward={reward:.3f}"}
+                )
+                rewards_list.append(float(reward))
+                terminateds_list.append(1.0)
+                if should_print and idx < 2:
+                    print(
+                        f"\n[Tool rollout {idx}] (id={meta.get('sample_id','')}) FINAL: "
+                        f"reward={reward:.4f} pre-penalty={details.get('answer_reward_prepenalty', 0):.4f} "
+                        f"P={details.get('tool_penalty_fraction', 0):.3f} "
+                        f"rounds={meta.get('tool_rounds', 0)} "
+                        f"f1={details.get('f1', 'n/a')}",
+                        flush=True,
+                    )
+
+        rewards = torch.tensor(rewards_list).cpu()
+        terminateds = torch.tensor(terminateds_list).cpu()
+        return EnvironmentReturn(
+            observations=observations,
+            metadata=metadata,
+            next_stop_strings=[None] * len(message_log_batch),
+            rewards=rewards,
+            terminateds=terminateds,
             answers=None,
         )
 

@@ -68,6 +68,50 @@ def compute_format_reward(response: str, gt_error_names: set[str]) -> float:
     return checks_passed / total_checks
 
 
+def compute_error_f1(
+    gt_errors: dict[str, float],
+    pred_errors: dict[str, float],
+) -> float:
+    """Per-rep error-detection F1 — the eval-anchored reward component
+    (LOCAL-ONLY, sgsilva 2026-07-13, report 2026-07-13_grpo_vobs_tool_scaffold.md §2.1).
+
+    MIRRORS the eval scorer's semantics (vlm-post-training
+    visual_obs/score_tool_loop_batch.py::_score_row, lines ~95-113, state
+    2026-07-13 — the scorer that produced every arm-comparison F1): presence =
+    severity > 1, pairs iterate the GT-LISTED fields only (a predicted name
+    absent from the GT block is IGNORED, exactly like the eval — hallucinated
+    names are handled by the format reward's name-match check, not here), a
+    missing predicted field counts as "not present" (FN if GT-present).
+
+    Two DELIBERATE deviations from _score_row, both documented in the report:
+    - no-error reps (no GT field > 1): the eval's per-rep f1 column is
+      structurally 0.0 there (TP impossible) and its headline number is the
+      POOLED F1, where such reps contribute only false positives. The per-rep
+      reward surrogate of that pooled behavior is 1.0 iff nothing is flagged,
+      else 0.0 — a flat 0.0 regardless of behavior would zero the gradient on
+      every tier-0 rep.
+    - no positional-zip fallback (the scorer's tolerance for name-mismatched
+      outputs): as a REWARD it would be gameable — any N numbers under any
+      names would pair up positionally.
+    """
+    gt_n = {normalize_error_name(k): v for k, v in gt_errors.items()}
+    pred_n = {normalize_error_name(k): v for k, v in pred_errors.items()}
+    tp = fp = fn = 0
+    for name, gt_sev in gt_n.items():
+        gt_present = gt_sev > 1.0
+        pred_present = pred_n.get(name, 1.0) > 1.0
+        if gt_present and pred_present:
+            tp += 1
+        elif (not gt_present) and pred_present:
+            fp += 1
+        elif gt_present and not pred_present:
+            fn += 1
+    if not any(v > 1.0 for v in gt_n.values()):
+        return 1.0 if fp == 0 else 0.0
+    denom = 2 * tp + fp + fn
+    return (2 * tp / denom) if denom > 0 else 0.0
+
+
 def compute_severity_reward(
     gt_movement_score: float,
     gt_errors: dict[str, float],
@@ -356,6 +400,19 @@ def compute_rep_reward(response: str, ground_truth: str, config: dict) -> tuple[
             detection_weight=dw, correctness_weight=cw, severity_weight=sw,
             format_weight=fw, error_weight=ew, non_error_weight=new,
         )
+
+    # Optional eval-anchored F1 component (LOCAL-ONLY, sgsilva 2026-07-13,
+    # tool-rollout GRPO — report §2.1). Default f1_weight=0.0 → the blend is a
+    # no-op and every existing config's reward is byte-identical.
+    f1w = config.get("f1_weight", 0.0)
+    if f1w > 0:
+        f1 = compute_error_f1(gt_errors, pred_errors)
+        details["f1"] = f1
+        if gt_ir is None or pred_ir is None:
+            base_w = 1.0 + (fw if format_reward is not None else 0.0)
+        else:
+            base_w = dw + cw + sw + (fw if (format_reward is not None and fw > 0) else 0.0)
+        final_reward = (base_w * final_reward + f1w * f1) / (base_w + f1w)
 
     # Compute component details for logging
     if gt_ms is not None and pred_ms is not None and gt_ir is not None and pred_ir is not None:

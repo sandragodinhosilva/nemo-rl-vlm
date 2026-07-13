@@ -1910,6 +1910,16 @@ def grpo_train(
                     "loss": train_results["loss"].numpy(),
                     "grad_norm": train_results["grad_norm"].numpy(),
                     "reward": rewards.numpy(),
+                    # LOCAL-ONLY (sgsilva 2026-07-13): within-group reward-std
+                    # collapse canary. The env-side avg_reward_std
+                    # (global_post_process_and_metrics) is DEAD CODE — never
+                    # called by this loop (2026-07-09 flaw audit, re-verified
+                    # 2026-07-13) — so log it here from the per-prompt std the
+                    # advantage calc already computed. → 0 means zero advantage
+                    # everywhere = GRPO has no signal (report 2026-06-26; and
+                    # low-cardinality per-rep F1 rewards make this the
+                    # load-bearing metric for the tool-rollout run).
+                    "reward_std_within_group": std.mean().detach().item(),
                     "mean_prompt_length": repeated_batch["length"].numpy(),
                     "total_num_tokens": input_lengths.numpy(),
                     # Add masked advantages tracking metrics (only for valid response tokens)
